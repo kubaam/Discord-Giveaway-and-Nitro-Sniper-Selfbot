@@ -136,6 +136,9 @@ Get instant updates for:
 ### ✅ **Bot Connected**  
 ![Bot Connected](assets/connect.png)  
 
+### ▶️ **Bot Running in Windows CMD**  
+![Bot Running in Windows CMD](https://github.com/kubaam/Discord-Giveaway-and-Nitro-Sniper-Selfbot/blob/main/assets/cmd.png)  
+
 ---
 
 ## **Advanced Features for Pro Users** 💎  
