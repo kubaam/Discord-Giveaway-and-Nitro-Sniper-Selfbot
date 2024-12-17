@@ -1,5 +1,3 @@
-Here's the updated **`README.md`** with improved **SEO optimization** and additional keywords to boost visibility and traffic:
-
 ---
 
 # 🎁 **Discord Giveaway and Nitro Sniper Selfbot** 🚀  
