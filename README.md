@@ -141,10 +141,20 @@ Get instant updates for:
 
 ## **Screenshots - See It in Action** 📸  
 
+### 🔑 **Nitro Redemption Notification**  
 ![Nitro Sniped](assets/nitroredeem.png)  
+
+### 🎉 **Giveaway Participation Alert**  
 ![Giveaway Entered](assets/gwsniped.png)  
+
+### 🏆 **Giveaway Win Notification**  
 ![Giveaway Won](assets/gwwon.png)  
+
+### ✅ **Bot Connected**  
 ![Bot Connected](assets/connect.png)  
+
+### ▶️ **Bot Running in Windows CMD**  
+![Bot Running in Windows CMD](https://github.com/kubaam/Discord-Giveaway-and-Nitro-Sniper-Selfbot/blob/main/assets/cmd.png)  
 
 ---
 
