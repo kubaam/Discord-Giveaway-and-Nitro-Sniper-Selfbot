@@ -75,11 +75,9 @@
         "max_snipes": 10,
         "cooldown_time": 300
     },
-
-    // ADD THIS: A list of words to skip reacting to giveaways
     "GiveawayBlacklist": [
         "fake",
         "bot",
-        "test",
+        "test"
     ]
 }
