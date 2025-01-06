@@ -1,5 +1,3 @@
----
-
 # 🎁 **Discord Giveaway and Nitro Sniper Selfbot** 🚀  
 
 ## **Overview - The Ultimate Discord Automation Tool**  
