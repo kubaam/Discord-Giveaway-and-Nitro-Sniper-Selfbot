@@ -1,5 +1,10 @@
 # 🎁 **Discord Giveaway and Nitro Sniper Selfbot** 🚀  
 
+![GitHub](https://img.shields.io/github/license/kubaam/Discord-Giveaway-and-Nitro-Sniper-Selfbot)
+![GitHub issues](https://img.shields.io/github/issues/kubaam/Discord-Giveaway-and-Nitro-Sniper-Selfbot)
+![GitHub stars](https://img.shields.io/github/stars/kubaam/Discord-Giveaway-and-Nitro-Sniper-Selfbot)
+
+
 ## **Overview - The Ultimate Discord Automation Tool**  
 
 Welcome to the **Discord Giveaway and Nitro Sniper Selfbot**, your one-stop solution for **automating Discord giveaways** and **sniping Discord Nitro codes** instantly! 🎉  
