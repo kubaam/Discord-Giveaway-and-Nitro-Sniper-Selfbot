@@ -72,12 +72,19 @@
         "b1c2d3e4f5g6h7i8j9k0l1m2n3o4p5q6"
     ],
     "NitroSettings": {
-        "max_snipes": 10,
+        "max_snipes": 100,
         "cooldown_time": 300
     },
     "GiveawayBlacklist": [
         "fake",
         "bot",
+        "Congratulations",
+        "has boosted",
+        "welcome",
+        "ticket",
+        "entered",
+        "won",
+        "has left",
         "test"
     ]
 }
