@@ -322,32 +322,43 @@ async def detect_giveaway_win(message: discord.Message):
 ###################################################################
 
 async def check_nitro_codes(message: discord.Message):
-    content_lower = message.content.lower()
-    if not any(x in content_lower for x in ["discord.gift/", "discordapp.com/gifts/", "discord.com/gifts/"]):
-        return
-
+    # Look for Nitro code patterns
     codes = re.findall(r"discord(?:\.gift|\.com/gifts|\.app\.com/gifts)/([a-zA-Z0-9]+)", message.content)
     tried_codes_path = "tried-nitro-codes.txt"
 
+    # If file doesn't exist, create an empty JSON array
     if not os.path.exists(tried_codes_path):
         async with aiofiles.open(tried_codes_path, "w", encoding="utf-8") as fp:
             await fp.write("[]")
 
+    # Read existing codes
     async with aiofiles.open(tried_codes_path, "r", encoding="utf-8") as fp:
         try:
             used_codes = json.loads(await fp.read())
         except json.JSONDecodeError:
             used_codes = []
 
+    # Identify codes that haven’t been tested yet
+    new_codes = [c for c in codes if len(c) in [16, 24] and c not in used_codes]
+
+    # If there are no new codes, just return
+    if not new_codes:
+        return
+
+    # Add the new codes to our used list
+    used_codes.extend(new_codes)
+
+    # Write the updated list back to file ONCE
     async with aiofiles.open(tried_codes_path, "w", encoding="utf-8") as fp:
-        for code in codes:
-            if len(code) in [16, 24] and code not in used_codes:
-                used_codes.append(code)
-                await fp.write(json.dumps(used_codes))
-                try:
-                    await redeem_nitro_code(config.token, code)
-                except Exception as e:
-                    await rate_limited_log(f"Error redeeming Nitro code {code}: {e}", level=logging.ERROR)
+        await fp.write(json.dumps(used_codes, indent=2))
+
+    # Redeem each new code (outside the file-writing loop)
+    for code in new_codes:
+        try:
+            await redeem_nitro_code(config.token, code)
+        except Exception as e:
+            await rate_limited_log(f"Error redeeming Nitro code {code}: {e}", level=logging.ERROR)
+
 
 ###################################################################
 # Nitro Redemption Logic
@@ -424,8 +435,8 @@ async def handle_giveaway_reaction(message: discord.Message):
     """
     Handles participation in a giveaway by:
     - Checking for blacklisted words
-    - Clicking a giveaway button if available
-    - Reacting with the 🎉 emoji if no button is found.
+    - Clicking the first available giveaway button if any
+    - Reacting with the 🎉 emoji if no button is found or the click fails.
     """
 
     # 1) Skip reacting if it's a webhook message or own message (no log)
@@ -457,29 +468,30 @@ async def handle_giveaway_reaction(message: discord.Message):
         location = f"Server: {message.guild.name} | Channel: {message.channel.name}"
         author = message.author.name
 
-        # Check if the message has components (buttons)
+        first_button = None
+        # Attempt to find the first available button
         if message.components:
             for row in message.components:
                 for component in getattr(row, 'children', []):
-                    if (
-                        hasattr(component, 'type') and
-                        component.type == discord.ComponentType.button and
-                        component.style in (
-                            discord.ButtonStyle.primary,
-                            discord.ButtonStyle.success
-                        )
-                    ):
-                        try:
-                            await component.click()
-                            await giveaway_info(message, "Clicked Button", location, author)
-                            return
-                        except discord.HTTPException as e:
-                            # Skip if missing permissions (50013) or unknown message (10008)
-                            if e.code in (50013, 10008):
-                                return
-                            await rate_limited_log(f"Error clicking giveaway button: {e}", level=logging.ERROR)
+                    if hasattr(component, 'type') and component.type == discord.ComponentType.button:
+                        first_button = component
+                        break  # Found the first button
+                if first_button:
+                    break
 
-        # Fallback: React with "🎉"
+        # Try clicking the first button if found
+        if first_button:
+            try:
+                await first_button.click()
+                await giveaway_info(message, "Clicked Button", location, author)
+                return
+            except discord.HTTPException as e:
+                # If clicking fails due to permission or unknown message, or other issues, fall back to emoji
+                if e.code not in (50013, 10008):
+                    await rate_limited_log(f"Error clicking giveaway button: {e}", level=logging.ERROR)
+                # Proceed to emoji reaction if button click fails
+
+        # Fallback: React with "🎉" if no button found or clicking failed
         await message.add_reaction("🎉")
         await giveaway_info(message, "Reacted with Emoji", location, author)
 
