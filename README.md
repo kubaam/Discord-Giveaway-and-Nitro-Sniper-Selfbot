@@ -192,7 +192,6 @@ Example `config.json`:
     ]
 }
 
-}  
 ```  
 
 ### 4️⃣ **Run the Selfbot**  
