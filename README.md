@@ -191,9 +191,6 @@ This project is licensed under the **MIT License**. See `LICENSE` for details.
 
 ---
 
-<!-- **Keywords for Maximum Traffic** 🚀  -->
-
-
 <!--
 - Discord Giveaway Sniper
 - Discord Nitro Sniper
@@ -244,5 +241,3 @@ This project is licensed under the **MIT License**. See `LICENSE` for details.
 - Discord Nitro Redeemer Tool Free
 - Discord Bot for Giveaway Auto Entry
 -->
-
----
