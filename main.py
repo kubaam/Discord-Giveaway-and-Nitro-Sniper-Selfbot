@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Giveaway & Nitro Sniper Self-Bot
+Using discord.py-self v2.0.1+
+Includes a monkey-patch to safely ignore `application: None` in THREAD_LIST_SYNC.
+"""
+
 import os
 import sys
 import time
@@ -20,11 +29,33 @@ import platform
 from collections import defaultdict
 
 # ----------------------------
-# Global Constants and Paths
+# Monkey-patch Message to drop None application fields
 # ----------------------------
-LOG_RESET_INTERVAL = 10  # seconds before resetting log rate counters
-RATE_LIMIT_THRESHOLD = 3  # max log messages per content per interval
-WEBHOOK_RATE_LIMIT_INTERVAL = 1  # seconds between webhook notifications
+from discord.message import Message as _Message
+
+_orig_message_init = _Message.__init__
+
+def _patched_message_init(self, *args, **kwargs):
+    # Locate the payload dict (usually kwargs['data'] or args[2])
+    payload = None
+    if 'data' in kwargs and isinstance(kwargs['data'], dict):
+        payload = kwargs['data']
+    elif len(args) >= 3 and isinstance(args[2], dict):
+        payload = args[2]
+    # Remove application if explicitly None
+    if payload is not None and payload.get('application') is None:
+        payload.pop('application', None)
+    # Call original initializer
+    return _orig_message_init(self, *args, **kwargs)
+
+_Message.__init__ = _patched_message_init
+
+# ----------------------------
+# Global Constants & Paths
+# ----------------------------
+LOG_RESET_INTERVAL = 10          # seconds to reset identical-msg counters
+RATE_LIMIT_THRESHOLD = 3         # max prints per identical msg per interval
+WEBHOOK_RATE_LIMIT_INTERVAL = 1  # sec between webhook posts
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRIED_CODES_PATH = os.path.join(BASE_DIR, "tried-nitro-codes.txt")
@@ -61,7 +92,8 @@ class AppLogger:
         self.lock = asyncio.Lock()
 
     async def rate_limited_log(
-        self, msg: str,
+        self,
+        msg: str,
         notify_everyone: bool = False,
         save: bool = False,
         level: int = logging.INFO
@@ -76,7 +108,8 @@ class AppLogger:
                 await self._log(msg, notify_everyone, save, level)
 
     async def _log(
-        self, msg: str,
+        self,
+        msg: str,
         notify: bool,
         save: bool,
         level: int
@@ -117,9 +150,13 @@ class WebhookNotifier:
             await app_logger.rate_limited_log(f"Webhook error: {e}", save=True, level=logging.ERROR)
 
     async def send(
-        self, title: str, description: str,
-        config: 'Config', session: aiohttp.ClientSession,
-        content: str = "", color: int = 0xFF8C7E,
+        self,
+        title: str,
+        description: str,
+        config: 'Config',
+        session: aiohttp.ClientSession,
+        content: str = "",
+        color: int = 0xFF8C7E,
         footer: str = "Giveaway Sniper",
         avatar_url: str = "https://i.imgur.com/44N46up.gif"
     ) -> None:
@@ -178,7 +215,7 @@ class Config:
             logging.critical(f"Config load failed: {e}")
             sys.exit(1)
 
-# Load config and allow env override
+# Load and override token from env if present
 config = Config.load()
 config.token = os.getenv("DISCORD_TOKEN", config.token)
 
@@ -189,7 +226,7 @@ MAX_NITRO_REDEEMS = int(config.nitro_settings.get("max_snipes", 5))
 nitro_semaphore = asyncio.Semaphore(MAX_NITRO_REDEEMS)
 
 # ----------------------------
-# Reload config on SIGHUP (Unix)
+# Reload config on SIGHUP
 # ----------------------------
 def _reload(sig=None, frame=None):
     global config, nitro_semaphore
@@ -205,7 +242,7 @@ if hasattr(signal, "SIGHUP"):
     signal.signal(signal.SIGHUP, _reload)
 
 # ----------------------------
-# HTTP Session with Timeout
+# HTTP Session Factory
 # ----------------------------
 http_session: Optional[aiohttp.ClientSession] = None
 
@@ -213,7 +250,10 @@ async def get_session() -> aiohttp.ClientSession:
     global http_session
     if http_session is None or http_session.closed:
         timeout = float(config.nitro_settings.get("request_timeout", 10))
-        http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), trust_env=True)
+        http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            trust_env=True
+        )
     return http_session
 
 # ----------------------------
@@ -240,13 +280,10 @@ async def save_used_codes(codes: Set[str]) -> None:
 USED_CODES: Set[str] = set()
 
 # ----------------------------
-# Utility Functions
+# Utilities
 # ----------------------------
 def clear_console() -> None:
-    if platform.system() == "Windows":
-        os.system("cls")
-    else:
-        os.system("clear")
+    os.system("cls" if platform.system() == "Windows" else "clear")
 
 async def restart_script() -> None:
     await app_logger.rate_limited_log("Restarting...", save=True, level=logging.WARNING)
@@ -274,17 +311,24 @@ def extract_embed_text(embed: discord.Embed) -> str:
     parts += [f"{f['name']}\n{f['value']}" for f in d.get("fields", [])]
     return "\n".join(p for p in parts if p).lower()
 
+def extract_first_button(message: discord.Message) -> Optional[Any]:
+    for row in getattr(message, "components", []):
+        for component in getattr(row, "children", []):
+            if getattr(component, "type", None) == discord.ComponentType.button:
+                return component
+    return None
+
 def contains_blacklisted(text: str, blacklist: List[str]) -> bool:
     tl = (text or "").lower()
     return any(term.lower() in tl for term in blacklist)
 
 # ----------------------------
-# Discord Bot Setup
+# Bot Setup
 # ----------------------------
 client = commands.Bot(
     command_prefix=";",
     help_command=None,
-    self_bot=True,
+    self_bot=True
 )
 
 def is_blacklisted(user_id: int) -> bool:
@@ -294,7 +338,7 @@ def is_blacklisted(user_id: int) -> bool:
     )
 
 # ----------------------------
-# Nitro Redemption with Tenacity
+# Nitro Redemption with retries
 # ----------------------------
 NITRO_MAX_RETRIES = int(config.nitro_settings.get("max_retries", 3))
 
@@ -406,10 +450,7 @@ async def handle_giveaway_reaction(message: discord.Message) -> None:
         return
     if contains_blacklisted(message.content or "", config.giveaway_blacklist):
         return
-    if any(
-        contains_blacklisted(extract_embed_text(e), config.giveaway_blacklist)
-        for e in message.embeds
-    ):
+    if any(contains_blacklisted(extract_embed_text(e), config.giveaway_blacklist) for e in message.embeds):
         return
 
     await asyncio.sleep(random.uniform(30, 60))
@@ -435,9 +476,7 @@ async def check_giveaway_message(message: discord.Message) -> None:
     ]
     content = (message.content or "").lower()
     embeds = [extract_embed_text(e) for e in message.embeds]
-    if any(k in content for k in keywords) or any(
-        k in em for em in embeds for k in keywords
-    ):
+    if any(k in content for k in keywords) or any(k in em for em in embeds for k in keywords):
         create_task_safe(handle_giveaway_reaction(message))
 
 async def detect_giveaway_win(message: discord.Message) -> None:
@@ -469,7 +508,7 @@ async def on_ready() -> None:
         config=config,
         session=session,
         color=0x2ECC71,
-        footer=f"discord.py {discord.__version__}"
+        footer=f"discord.py-self {discord.__version__}"
     )
 
 @client.event
