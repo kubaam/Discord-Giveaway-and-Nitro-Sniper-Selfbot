@@ -483,10 +483,13 @@ async def detect_giveaway_win(message: discord.Message) -> None:
     if not (client.user and message.guild and message.author):
         return
     win_keywords = ["won", "winner", "congratulations", "victory", "congrats"]
+    # message.content may be None for certain system messages
     content = (message.content or "").lower()
-    mentioned = any(m.id == client.user.id for m in message.mentions) or \
-                f"<@{client.user.id}>" in message.content or \
-                f"<@!{client.user.id}>" in message.content
+    mentioned = (
+        any(m.id == client.user.id for m in message.mentions)
+        or f"<@{client.user.id}>" in content
+        or f"<@!{client.user.id}>" in content
+    )
     if mentioned and any(k in content for k in win_keywords):
         await giveaway_info(message, "Won")
 
