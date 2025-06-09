@@ -75,6 +75,7 @@
         "max_snipes": 100,
         "cooldown_time": 300
     },
+    "DMMessage": "Thanks for hosting the giveaway!",
     "GiveawayBlacklist": [
         "fake",
         "bot",
