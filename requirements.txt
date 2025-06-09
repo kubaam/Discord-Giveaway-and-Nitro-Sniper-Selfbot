@@ -13,3 +13,4 @@ aiodns
 dnspython
 tenacity
 pyotp
+pytest
