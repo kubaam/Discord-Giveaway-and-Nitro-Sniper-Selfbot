@@ -1,0 +1,19 @@
+name: CI
+on:
+  pull_request:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: >-
+          pip install -r requirements.txt flake8 bandit pytest black pip-audit
+      - run: black --check .
+      - run: flake8
+      - run: bandit -r .
+      - run: pip-audit
+      - run: pytest

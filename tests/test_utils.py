@@ -1,7 +1,9 @@
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import pytest
-from main import contains_blacklisted
+
+from main import contains_blacklisted  # noqa: E402
 
 
 def test_contains_blacklisted_case_insensitive():
