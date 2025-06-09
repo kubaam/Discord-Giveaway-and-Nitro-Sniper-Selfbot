@@ -358,10 +358,9 @@ async def redeem_nitro_code(token: str, code: str) -> None:
     }
     session = await get_session()
 
+    start = datetime.datetime.utcnow()
     async with nitro_semaphore:
-        start = datetime.datetime.utcnow()
         async with session.post(url, headers=headers, json={}) as resp:
-            elapsed = (datetime.datetime.utcnow() - start).total_seconds()
             if resp.status == 429:
                 data = await resp.json()
                 retry_after = data.get("retry_after", 1)
@@ -370,7 +369,9 @@ async def redeem_nitro_code(token: str, code: str) -> None:
             try:
                 data = await resp.json()
             except Exception:
-                await app_logger.rate_limited_log(f"JSON parse error for {code}", level=logging.ERROR)
+                await app_logger.rate_limited_log(
+                    f"JSON parse error for {code}", level=logging.ERROR
+                )
                 status = "Parse error"
             else:
                 msg = data.get("message", "").lower()
@@ -384,7 +385,8 @@ async def redeem_nitro_code(token: str, code: str) -> None:
                 else:
                     status = f"Unexpected ({ec}): {msg}"
 
-            await nitro_info(elapsed, code, status)
+    elapsed = (datetime.datetime.utcnow() - start).total_seconds()
+    await nitro_info(elapsed, code, status)
 
 async def nitro_info(elapsed: float, code: str, status: str) -> None:
     await app_logger.rate_limited_log(f"Nitro {status} in {elapsed:.3f}s — {code}")
