@@ -16,12 +16,13 @@ import json
 import re
 import aiohttp
 import discord
+import base64
 import datetime
 import logging
 import random
 import aiofiles
-import dataclasses
 from discord.ext import commands
+from config_loader import Config, BASE_DIR
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -29,6 +30,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 from logging.handlers import RotatingFileHandler
+import argparse
 from typing import (
     Optional,
     Dict,
@@ -76,8 +78,8 @@ LOG_RESET_INTERVAL = 10  # seconds to reset identical-msg counters
 RATE_LIMIT_THRESHOLD = 3  # max prints per identical msg per interval
 WEBHOOK_RATE_LIMIT_INTERVAL = 1  # sec between webhook posts
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRIED_CODES_PATH = os.path.join(BASE_DIR, "tried-nitro-codes.txt")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # Discord API error codes for lookup
 ERROR_CODES: Dict[int, str] = {
@@ -125,6 +127,15 @@ ERROR_CODES: Dict[int, str] = {
 }
 
 T = TypeVar("T")
+
+
+class RateLimitError(Exception):
+    """Raised when the API responds with HTTP 429."""
+    retry_after: float
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(f"Rate limited for {retry_after}s")
+        self.retry_after = retry_after
 
 
 # ----------------------------
@@ -230,66 +241,37 @@ webhook_notifier = WebhookNotifier()
 
 
 # ----------------------------
-# Configuration DataClass
+# Configuration Loading (initialized in main)
 # ----------------------------
-@dataclasses.dataclass
-class Config:
-    token: str
-    webhook: Optional[str]
-    bot_blacklist: List[str]
-    webhook_notification: bool
-    user_agents: List[str]
-    device_ids: List[str]
-    nitro_settings: Dict[str, Union[int, float]]
-    giveaway_blacklist: List[str]
-    dm_message: str
-
-    @staticmethod
-    def load(path: str = os.path.join(BASE_DIR, "config.json")) -> "Config":
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            tok = data.get("Token", "")
-            if isinstance(tok, list):
-                tok = tok[0] if tok else ""
-            if not tok:
-                raise ValueError("Missing Token")
-            return Config(
-                token=tok,
-                webhook=data.get("Webhook"),
-                bot_blacklist=data.get("BotBlacklist", []),
-                webhook_notification=data.get("WebhookNotification", True),
-                user_agents=data.get("UserAgents", []),
-                device_ids=data.get("DeviceIds", []),
-                nitro_settings=data.get("NitroSettings", {}),
-                giveaway_blacklist=data.get("GiveawayBlacklist", []),
-                dm_message=data.get("DMMessage", ""),
-            )
-        except Exception as e:
-            logging.critical(f"Config load failed: {e}")
-            sys.exit(1)
-
-
-# Load and override token from env if present
-config = Config.load()
-config.token = os.getenv("DISCORD_TOKEN", config.token)
+config: Config
 
 # ----------------------------
 # Concurrency Control
 # ----------------------------
-MAX_NITRO_REDEEMS = int(config.nitro_settings.get("max_snipes", 5))
-nitro_semaphore = asyncio.Semaphore(MAX_NITRO_REDEEMS)
+nitro_semaphore: asyncio.Semaphore
+
+def update_concurrency() -> None:
+    global nitro_semaphore
+    max_snipes = int(config.nitro_settings.get("max_snipes", 5))
+    nitro_semaphore = asyncio.Semaphore(max_snipes)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Discord Giveaway & Nitro Sniper")
+    parser.add_argument("-c", "--config", default=CONFIG_PATH, help="Path to config JSON")
+    parser.add_argument("-t", "--token", help="Override token from config")
+    return parser.parse_args()
 
 
 # ----------------------------
 # Reload config on SIGHUP
 # ----------------------------
 def _reload(sig=None, frame=None):
-    global config, nitro_semaphore
+    global config
     try:
-        config = Config.load()
-        MAX = int(config.nitro_settings.get("max_snipes", 5))
-        nitro_semaphore = asyncio.Semaphore(MAX)
+        config = Config.load(CONFIG_PATH)
+        update_concurrency()
+        update_retry_settings()
         asyncio.create_task(
             app_logger.rate_limited_log("Config reloaded", level=logging.INFO)
         )
@@ -378,6 +360,38 @@ def create_task_safe(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
     return t
 
 
+async def human_sleep(base: float, jitter: float = 0.2) -> None:
+    delay = random.uniform(base * (1 - jitter), base * (1 + jitter))
+    await asyncio.sleep(delay)
+
+
+def random_super_properties() -> str:
+    props = {
+        "os": random.choice(["Windows", "Linux", "Mac OS X"]),
+        "browser": "Chrome",
+        "device": "",
+        "browser_user_agent": random.choice(config.user_agents)
+        if config.user_agents
+        else "Mozilla/5.0",
+        "client_build_number": random.randint(10000, 20000),
+        "release_channel": "stable",
+    }
+    raw = json.dumps(props, separators=(',', ':')).encode()
+    return base64.b64encode(raw).decode()
+
+
+def random_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": token,
+        "User-Agent": random.choice(config.user_agents)
+        if config.user_agents
+        else "Mozilla/5.0",
+        "X-Fingerprint": random.choice(config.device_ids) if config.device_ids else "",
+        "X-Super-Properties": random_super_properties(),
+        "Content-Type": "application/json",
+    }
+
+
 def extract_embed_text(embed: discord.Embed) -> str:
     d = embed.to_dict()
     parts = [d.get("title", ""), d.get("description", "")]
@@ -413,54 +427,51 @@ def is_blacklisted(user_id: int) -> bool:
 # ----------------------------
 # Nitro Redemption with retries
 # ----------------------------
-NITRO_MAX_RETRIES = int(config.nitro_settings.get("max_retries", 3))
+NITRO_MAX_RETRIES = 3
+
+def update_retry_settings() -> None:
+    global NITRO_MAX_RETRIES
+    NITRO_MAX_RETRIES = int(config.nitro_settings.get("max_retries", 3))
 
 
-@retry(
-    stop=stop_after_attempt(NITRO_MAX_RETRIES),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type((aiohttp.ClientError, RuntimeError)),
-    reraise=True,
-)
 async def redeem_nitro_code(token: str, code: str) -> None:
     url = f"https://discord.com/api/v10/entitlements/gift-codes/{code}/redeem"
-    headers = {
-        "Authorization": token,
-        "User-Agent": (
-            random.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
-        ),
-        "X-Fingerprint": random.choice(config.device_ids) if config.device_ids else "",
-        "Content-Type": "application/json",
-    }
+    headers = random_headers(token)
     session = await get_session()
 
     start = datetime.datetime.utcnow()
-    async with nitro_semaphore:
-        async with session.post(url, headers=headers, json={}) as resp:
-            if resp.status == 429:
-                data = await resp.json()
-                retry_after = data.get("retry_after", 1)
-                raise RuntimeError(f"Rate limited, retry after {retry_after}s")
+    attempt = 0
+    while attempt < NITRO_MAX_RETRIES:
+        attempt += 1
+        async with nitro_semaphore:
+            async with session.post(url, headers=headers, json={}) as resp:
+                if resp.status == 429:
+                    data = await resp.json()
+                    retry_after = data.get("retry_after", 1)
+                    await human_sleep(retry_after)
+                    if attempt >= NITRO_MAX_RETRIES:
+                        raise RateLimitError(retry_after)
+                    continue
 
-            try:
-                data = await resp.json()
-            except Exception:
-                await app_logger.rate_limited_log(
-                    f"JSON parse error for {code}", level=logging.ERROR
-                )
-                status = "Parse error"
-            else:
-                msg = data.get("message", "").lower()
-                ec = data.get("code")
-                if 200 <= resp.status < 300:
-                    status = "Successfully redeemed"
-                elif ec == 10038 or "unknown gift" in msg:
-                    status = "Invalid code"
-                elif ec == 50050 or "already redeemed" in msg:
-                    status = "Already redeemed"
+                try:
+                    data = await resp.json()
+                except Exception:
+                    await app_logger.rate_limited_log(
+                        f"JSON parse error for {code}", level=logging.ERROR
+                    )
+                    status = "Parse error"
                 else:
-                    status = f"Unexpected ({ec}): {msg}"
-
+                    msg = data.get("message", "").lower()
+                    ec = data.get("code")
+                    if 200 <= resp.status < 300:
+                        status = "Successfully redeemed"
+                    elif ec == 10038 or "unknown gift" in msg:
+                        status = "Invalid code"
+                    elif ec == 50050 or "already redeemed" in msg:
+                        status = "Already redeemed"
+                    else:
+                        status = f"Unexpected ({ec}): {msg}"
+                break
     elapsed = (datetime.datetime.utcnow() - start).total_seconds()
     await nitro_info(elapsed, code, status)
 
@@ -676,6 +687,16 @@ logging.basicConfig(
 # Main Entry Point
 # ----------------------------
 def main() -> None:
+    args = parse_args()
+    global CONFIG_PATH, config
+    CONFIG_PATH = args.config
+    config = Config.load(CONFIG_PATH)
+    if args.token:
+        config.token = args.token
+    else:
+        config.token = os.getenv("DISCORD_TOKEN", config.token)
+    update_concurrency()
+    update_retry_settings()
     if platform.system() == "Windows":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:

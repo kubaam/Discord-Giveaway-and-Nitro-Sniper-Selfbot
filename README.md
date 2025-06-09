@@ -193,11 +193,12 @@ Example `config.json`:
 
 ```  
 
-### 4️⃣ **Run the Selfbot**  
-Start the bot with:  
-```bash  
-python main.py
+### 4️⃣ **Run the Selfbot**
+Start the bot with:
+```bash
+python main.py [-c path/to/config.json] [--token YOUR_TOKEN]
 ```
+If the bot exits with `Invalid config`, ensure your JSON follows the schema in `config_loader.py`.
 
 ## Architecture Overview
 
