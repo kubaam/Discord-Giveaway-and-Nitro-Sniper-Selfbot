@@ -196,12 +196,19 @@ Example `config.json`:
 ### 4️⃣ **Run the Selfbot**  
 Start the bot with:  
 ```bash  
-python main.py  
-```  
+python main.py
+```
+
+## Architecture Overview
+
+```
+Message -> on_message -> check_nitro_codes / check_giveaway_message
+        \-> redeem_nitro_code -> webhook_notifier
+```
 
 ---
 
-## **How It Works - Key Functionalities Explained** 🔑  
+## **How It Works - Key Functionalities Explained** 🔑
 
 ### **⚡ Discord Nitro Sniping**  
 - Detects Nitro codes like `discord.gift/xyz123`.  
