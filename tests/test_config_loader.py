@@ -1,6 +1,5 @@
-import os
 import json
-from config_loader import Config, ConfigModel
+from config_loader import Config
 
 
 def test_config_validation(tmp_path):
@@ -19,4 +18,3 @@ def test_config_validation(tmp_path):
     cfg_path.write_text(json.dumps(sample))
     cfg = Config.load(str(cfg_path))
     assert cfg.token == "tok"
-

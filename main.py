@@ -23,23 +23,15 @@ import random
 import aiofiles
 from discord.ext import commands
 from config_loader import Config, BASE_DIR
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 from logging.handlers import RotatingFileHandler
 import argparse
 from typing import (
-    Optional,
-    Dict,
-    List,
-    Union,
-    Set,
     Any,
     Coroutine,
-    TypeVar,
+    Dict,
+    List,
+    Optional,
+    Set,
 )
 import platform
 from collections import defaultdict
@@ -124,9 +116,8 @@ ERROR_CODES: Dict[int, str] = {
     50050: "This gift has been redeemed already.",
     50054: "Cannot self-redeem this gift",
     60003: "Two-factor is required for this operation",
-}
 
-T = TypeVar("T")
+}
 
 
 class RateLimitError(Exception):
@@ -243,12 +234,14 @@ webhook_notifier = WebhookNotifier()
 # ----------------------------
 # Configuration Loading (initialized in main)
 # ----------------------------
+
 config: Config
 
 # ----------------------------
 # Concurrency Control
 # ----------------------------
-nitro_semaphore: asyncio.Semaphore
+nitro_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
+
 
 def update_concurrency() -> None:
     global nitro_semaphore
