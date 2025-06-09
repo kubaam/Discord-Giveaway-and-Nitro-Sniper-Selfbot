@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+.Python
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Logs
+logs.txt
+
+# Virtual environments
+venv/
+ENV/
+
+# Misc
+tried-nitro-codes.txt
+
