@@ -242,6 +242,7 @@ class Config:
     device_ids: List[str]
     nitro_settings: Dict[str, Union[int, float]]
     giveaway_blacklist: List[str]
+    dm_message: str
 
     @staticmethod
     def load(path: str = os.path.join(BASE_DIR, "config.json")) -> "Config":
@@ -262,6 +263,7 @@ class Config:
                 device_ids=data.get("DeviceIds", []),
                 nitro_settings=data.get("NitroSettings", {}),
                 giveaway_blacklist=data.get("GiveawayBlacklist", []),
+                dm_message=data.get("DMMessage", ""),
             )
         except Exception as e:
             logging.critical(f"Config load failed: {e}")
@@ -587,6 +589,27 @@ async def detect_giveaway_win(message: discord.Message) -> None:
     )
     if mentioned and any(k in content for k in win_keywords):
         await giveaway_info(message, "Won")
+
+        host_user = None
+        for embed in message.embeds:
+            for field in getattr(embed, "fields", []):
+                if "host" in field.name.lower():
+                    m = re.search(r"<@!?(\d+)>", field.value)
+                    if m:
+                        uid = int(m.group(1))
+                        host_user = message.guild.get_member(uid) or await client.fetch_user(uid)
+                    break
+            if host_user:
+                break
+
+        if host_user and not host_user.bot and config.dm_message:
+            try:
+                await host_user.send(config.dm_message)
+                await app_logger.rate_limited_log(f"DM sent to host {host_user}")
+            except Exception as e:
+                await app_logger.rate_limited_log(
+                    f"DM host failed: {e}", level=logging.ERROR
+                )
 
 
 # ----------------------------
