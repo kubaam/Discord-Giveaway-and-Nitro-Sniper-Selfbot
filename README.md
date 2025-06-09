@@ -81,14 +81,13 @@ cd Discord-Giveaway-and-Nitro-Sniper-Selfbot
 ```  
 
 ### 2️⃣ **Install Dependencies**  
-Make sure you have **Python 3.7+** installed, then run:  
+Make sure you have **Python 3.8+** installed, then run:
 ```bash  
 pip install -r requirements.txt  
 ```  
 
-### 3️⃣ **Configure the Bot**  
-- Copy `config.json.example` to `config.json`.  
-- Edit `config.json` and add your:  
+### 3️⃣ **Configure the Bot**
+- Edit `config.json` and add your:
   - **Discord Token** (required).  
   - **Webhook URL** for notifications.  
   - **User Agents**, **Device IDs**, and blacklist settings.  
