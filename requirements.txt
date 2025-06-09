@@ -14,3 +14,4 @@ dnspython
 tenacity
 pyotp
 pytest
+pydantic
