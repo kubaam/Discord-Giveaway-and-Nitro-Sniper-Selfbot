@@ -17,3 +17,17 @@ def test_contains_blacklisted_empty_string():
     blacklist = ["bad"]
     assert not contains_blacklisted("", blacklist)
     assert not contains_blacklisted(None, blacklist)
+
+
+def test_random_headers_fingerprint_optional(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, 'config', type('Cfg', (), {})(), raising=False)
+    main.config.user_agents = []
+    main.config.device_ids = []
+    headers = main.random_headers('tok')
+    assert 'X-Fingerprint' not in headers
+
+    main.config.device_ids = ['abc', 'def']
+    headers = main.random_headers('tok')
+    assert headers['X-Fingerprint'] in ['abc', 'def']
