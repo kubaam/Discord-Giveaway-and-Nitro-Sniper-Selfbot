@@ -1,19 +1,22 @@
 from __future__ import annotations
+
+import logging
 import os
 import sys
-import json
-import logging
-from typing import List, Optional, Union, Dict
-from pydantic import BaseModel, HttpUrl, ValidationError, Field
+from typing import Dict, List, Optional, Union
+
+from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
 
 class NitroSettingsModel(BaseModel):
     max_snipes: int = Field(default=5, ge=1)
     cooldown_time: int = Field(default=300, ge=0)
     request_timeout: float = Field(default=10.0, gt=0)
     max_retries: int = Field(default=3, ge=1)
+
 
 class ConfigModel(BaseModel):
     Token: Union[List[str], str]
@@ -53,4 +56,3 @@ class Config:
         except Exception as e:
             logging.critical(f"Config load failed: {e}")
             sys.exit(1)
-
