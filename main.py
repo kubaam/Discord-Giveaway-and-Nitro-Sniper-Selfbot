@@ -374,15 +374,17 @@ def random_super_properties() -> str:
 
 
 def random_headers(token: str) -> Dict[str, str]:
-    return {
+    headers = {
         "Authorization": token,
         "User-Agent": random.choice(config.user_agents)
         if config.user_agents
         else "Mozilla/5.0",
-        "X-Fingerprint": random.choice(config.device_ids) if config.device_ids else "",
         "X-Super-Properties": random_super_properties(),
         "Content-Type": "application/json",
     }
+    if config.device_ids:
+        headers["X-Fingerprint"] = random.choice(config.device_ids)
+    return headers
 
 
 def extract_embed_text(embed: discord.Embed) -> str:
