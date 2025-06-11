@@ -21,6 +21,8 @@ import base64
 import datetime
 import logging
 import random
+import secrets
+import subprocess
 import aiofiles
 from discord.ext import commands
 from config_loader import Config, BASE_DIR
@@ -117,12 +119,12 @@ ERROR_CODES: Dict[int, str] = {
     50050: "This gift has been redeemed already.",
     50054: "Cannot self-redeem this gift",
     60003: "Two-factor is required for this operation",
-
 }
 
 
 class RateLimitError(Exception):
     """Raised when the API responds with HTTP 429."""
+
     retry_after: float
 
     def __init__(self, retry_after: float) -> None:
@@ -252,7 +254,9 @@ def update_concurrency() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discord Giveaway & Nitro Sniper")
-    parser.add_argument("-c", "--config", default=CONFIG_PATH, help="Path to config JSON")
+    parser.add_argument(
+        "-c", "--config", default=CONFIG_PATH, help="Path to config JSON"
+    )
     parser.add_argument("-t", "--token", help="Override token from config")
     return parser.parse_args()
 
@@ -326,7 +330,11 @@ USED_CODES: Set[str] = set()
 # Utilities
 # ----------------------------
 def clear_console() -> None:
-    os.system("cls" if platform.system() == "Windows" else "clear")
+    cmd = "cls" if platform.system() == "Windows" else "clear"
+    try:
+        subprocess.run([cmd], check=False)
+    except FileNotFoundError:
+        pass
 
 
 async def restart_script() -> None:
@@ -357,19 +365,19 @@ def create_task_safe(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
 
 
 async def human_sleep(base: float, jitter: float = 0.2) -> None:
-    delay = random.uniform(base * (1 - jitter), base * (1 + jitter))
+    delay = random.SystemRandom().uniform(base * (1 - jitter), base * (1 + jitter))
     await asyncio.sleep(delay)
 
 
 def random_super_properties() -> str:
     props = {
-        "os": random.choice(["Windows", "Linux", "Mac OS X"]),
+        "os": secrets.choice(["Windows", "Linux", "Mac OS X"]),
         "browser": "Chrome",
         "device": "",
-        "browser_user_agent": random.choice(config.user_agents)
-        if config.user_agents
-        else "Mozilla/5.0",
-        "client_build_number": random.randint(10000, 20000),
+        "browser_user_agent": (
+            secrets.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
+        ),
+        "client_build_number": secrets.randbelow(10000) + 10000,
         "release_channel": "stable",
     }
     raw = orjson.dumps(props)
@@ -379,14 +387,14 @@ def random_super_properties() -> str:
 def random_headers(token: str) -> Dict[str, str]:
     headers = {
         "Authorization": token,
-        "User-Agent": random.choice(config.user_agents)
-        if config.user_agents
-        else "Mozilla/5.0",
+        "User-Agent": (
+            secrets.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
+        ),
         "X-Super-Properties": random_super_properties(),
         "Content-Type": "application/json",
     }
     if config.device_ids:
-        headers["X-Fingerprint"] = random.choice(config.device_ids)
+        headers["X-Fingerprint"] = secrets.choice(config.device_ids)
     return headers
 
 
@@ -426,6 +434,7 @@ def is_blacklisted(user_id: int) -> bool:
 # Nitro Redemption with retries
 # ----------------------------
 NITRO_MAX_RETRIES = 3
+
 
 def update_retry_settings() -> None:
     global NITRO_MAX_RETRIES
@@ -546,7 +555,7 @@ async def handle_giveaway_reaction(message: discord.Message) -> None:
     ):
         return
 
-    await asyncio.sleep(random.uniform(30, 60))
+    await asyncio.sleep(random.SystemRandom().uniform(30, 60))
     try:
         btn = extract_first_button(message)
         if btn:
@@ -606,7 +615,9 @@ async def detect_giveaway_win(message: discord.Message) -> None:
                     m = re.search(r"<@!?(\d+)>", field.value)
                     if m:
                         uid = int(m.group(1))
-                        host_user = message.guild.get_member(uid) or await client.fetch_user(uid)
+                        host_user = message.guild.get_member(
+                            uid
+                        ) or await client.fetch_user(uid)
                     break
             if host_user:
                 break
