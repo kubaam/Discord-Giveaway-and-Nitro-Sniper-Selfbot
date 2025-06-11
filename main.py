@@ -13,6 +13,7 @@ import time
 import signal
 import asyncio
 import json
+import orjson
 import re
 import aiohttp
 import discord
@@ -288,7 +289,9 @@ async def get_session() -> aiohttp.ClientSession:
     if http_session is None or http_session.closed:
         timeout = float(config.nitro_settings.get("request_timeout", 10))
         http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout), trust_env=True
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            trust_env=True,
+            json_serialize=lambda v: orjson.dumps(v).decode(),
         )
     return http_session
 
@@ -300,9 +303,9 @@ async def load_used_codes() -> Set[str]:
     if not os.path.exists(TRIED_CODES_PATH):
         return set()
     try:
-        async with aiofiles.open(TRIED_CODES_PATH, "r", encoding="utf-8") as f:
+        async with aiofiles.open(TRIED_CODES_PATH, "rb") as f:
             data = await f.read()
-            return set(json.loads(data) or [])
+            return set(orjson.loads(data) or [])
     except Exception as e:
         await app_logger.rate_limited_log(f"Load codes error: {e}", level=logging.ERROR)
         return set()
@@ -310,8 +313,8 @@ async def load_used_codes() -> Set[str]:
 
 async def save_used_codes(codes: Set[str]) -> None:
     try:
-        async with aiofiles.open(TRIED_CODES_PATH, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(sorted(codes), indent=2))
+        async with aiofiles.open(TRIED_CODES_PATH, "wb") as f:
+            await f.write(orjson.dumps(sorted(codes), option=orjson.OPT_INDENT_2))
     except Exception as e:
         await app_logger.rate_limited_log(f"Save codes error: {e}", level=logging.ERROR)
 
@@ -369,7 +372,7 @@ def random_super_properties() -> str:
         "client_build_number": random.randint(10000, 20000),
         "release_channel": "stable",
     }
-    raw = json.dumps(props, separators=(',', ':')).encode()
+    raw = orjson.dumps(props)
     return base64.b64encode(raw).decode()
 
 
