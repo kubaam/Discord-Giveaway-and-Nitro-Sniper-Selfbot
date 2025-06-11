@@ -5,6 +5,8 @@ import os
 import sys
 from typing import Dict, List, Optional, Union
 
+import orjson
+
 from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,8 +49,11 @@ class Config:
 
     @staticmethod
     def load(path: str = CONFIG_PATH) -> "Config":
+        """Load configuration from JSON using fast orjson parser."""
         try:
-            model = ConfigModel.parse_file(path)
+            with open(path, "rb") as f:
+                data = orjson.loads(f.read())
+            model = ConfigModel.parse_obj(data)
             return Config(model)
         except ValidationError as e:
             logging.critical(f"Invalid config: {e}")
