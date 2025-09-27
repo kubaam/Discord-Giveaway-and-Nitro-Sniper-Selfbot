@@ -198,6 +198,11 @@ Start the bot with:
 ```bash
 python main.py [-c path/to/config.json] [--token YOUR_TOKEN]
 ```
+or use the provided launch scripts, which automatically manage a virtual environment and install dependencies:
+
+- **Windows:** `launch.bat`
+- **Linux/macOS:** `./launch.sh`
+
 If the bot exits with `Invalid config`, ensure your JSON follows the schema in `config_loader.py`.
 
 ## Architecture Overview
