@@ -87,123 +87,94 @@ pip install -r requirements.txt
 ```  
 
 ### 3️⃣ **Configure the Bot**
-- Edit `config.json` and add your:
-  - **Discord Token** (required).  
-  - **Webhook URL** for notifications.  
-  - **User Agents**, **Device IDs**, and blacklist settings.  
+- Create `config.json` in the project root (or update the existing file) and fill in your account details.
+- **One account must be marked as `"is_main": true`**. Additional feeder accounts can set `"is_feeder": true` to snipe codes on behalf of the main profile.
+- Provide a realistic `user_agent` and `device_id` for every account to reduce detection risk.
+- Optional settings let you fine-tune webhook notifications, giveaway filtering, Nitro rate limits, and invite sniping.
 
-Example `config.json`:  
-```json  
-{  
-    "Token": ["YOUR_DISCORD_USER_TOKEN"],  
-    "Webhook": "YOUR_WEBHOOK_URL",  
-    "WebhookNotification": true,
-    "BotBlacklist": [
-        "432610292342587392",
-        "1156418379050127430",
-        "1137344054187802664",
-        "1089476688246738985",
-        "1154077045903593555",
-        "1149106738151305216",
-        "1074118427184205974",
-        "1093310583266353192",
-        "776897904404987946",
-        "1164588905065095219",
-        "1140615763082879047",
-        "646937666251915264",
-        "368521195940741122",
-        "1028956609382199346",
-        "571027211407196161",
-        "1071634826341396540",
-        "838278395795079209",
-        "320731871359008768",
-        "1201646718895280148",
-        "415773861486002186",
-        "1100424685272961135",
-        "873722451547291678",
-        "1006190394415005788",
-        "1153715777594200074",
-        "1089935069927456849",
-        "669228505128501258",
-        "1130083482878623835",
-        "716390085896962058",
-        "678344927997853742",
-        "1274435601470459946",
-        "356268235697553409",
-        "1275655805093281863",
-        "907648113777455114",
-        "1193672589428654120",
-        "566974579281625089",
-        "880741926918303746",
-        "408785106942164992",
-        "1279183892699414598",
-        "429457053791158281",
-        "346353957029019648",
-        "346353957029019648",
-        "751151926959276050"
-    ],
-    "UserAgents": [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
-        "Mozilla/5.0 (Linux; Android 11; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Mobile Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/18.18362 Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 9; Pixel 3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.116 Mobile Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:45.0) Gecko/20100101 Firefox/45.0",
-        "Mozilla/5.0 (Linux; Android 10; SM-A505FN) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/12.1 Chrome/79.0.3945.136 Mobile Safari/537.36",
-        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:91.0) Gecko/20100101 Firefox/91.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36"
-    ],
-    "DeviceIds": [
-        "a1b2c3d4e5f6g7h8i9j0",
-        "098f6bcd4621d373cade4e832627b4f6",
-        "e5b3d9c7a1f8h2g4i0j7k6l5m9n8o3p1",
-        "d41d8cd98f00b204e9800998ecf8427e",
-        "1a2b3c4d5e6f7g8h9i0jklmnopqrstu",
-        "2b4e6f7g8h9i0j1k2l3m4n5o6p7q8r9s",
-        "09876abcd4321efg098hijklmn5678op",
-        "f7e6d5c4b3a2g9h8j7i6k5l4m3n2o1p0",
-        "3a4b5c6d7e8f9g0h1i2j3k4l5m6n7o8p",
-        "a9b8c7d6e5f4g3h2i1j0k1l2m3n4o5p6",
-        "1234567890abcdef1234567890abcdef",
-        "abcdef0987654321abcdef0987654321",
-        "fedcba9876543210fedcba9876543210",
-        "b1c2d3e4f5g6h7i8j9k0l1m2n3o4p5q6"
-    ],
-    "NitroSettings": {
-        "max_snipes": 100,
-        "cooldown_time": 300
+Example `config.json` aligned with the current schema:
+```json
+{
+  "accounts": [
+    {
+      "token": "MAIN_ACCOUNT_TOKEN",
+      "is_main": true,
+      "is_feeder": false,
+      "proxy_url": null,
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+      "device_id": "8a3f53cf8f7c4e5ca2f8a54acb861234"
     },
-    "GiveawayBlacklist": [
-        "fake",
-        "bot",
-        "Congratulations",
-        "has boosted",
-        "welcome",
-        "ticket",
-        "entered",
-        "won",
-        "has left",
-        "test"
-    ]
+    {
+      "token": "FEEDER_ACCOUNT_TOKEN",
+      "is_main": false,
+      "is_feeder": true,
+      "proxy_url": "http://127.0.0.1:8080",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+      "device_id": "5b86d1f733e14bd0aa529cc77e4a2b1f"
+    }
+  ],
+  "webhook_url": "https://discord.com/api/webhooks/...",
+  "webhook_notifications": true,
+  "bot_author_blacklist": [
+    432610292342587392,
+    1156418379050127430
+  ],
+  "nitro_settings": {
+    "max_concurrent_snipes": 5,
+    "request_timeout": 8.0,
+    "max_retries": 3
+  },
+  "giveaway_settings": {
+    "min_delay_sec": 2.5,
+    "max_delay_sec": 7.0,
+    "dm_message": "Thanks for hosting!",
+    "global_blacklist_keywords": [
+      "test",
+      "fake"
+    ],
+    "server_specific_rules": {
+      "123456789012345678": {
+        "whitelist": [
+          "nitro"
+        ],
+        "blacklist": [
+          "bot"
+        ]
+      }
+    }
+  },
+  "invite_sniper_settings": {
+    "enabled": false,
+    "min_member_count": 50,
+    "max_member_count": 50000,
+    "server_blacklist_ids": [],
+    "max_joins_per_hour": 5
+  }
 }
+```
 
-```  
+### Configuration Reference
+
+| Section | Purpose | Key Fields |
+| --- | --- | --- |
+| `accounts[]` | Defines each Discord user the selfbot will control. Exactly one `is_main` account is required; feeder accounts forward redeemed Nitro to the main profile. | `token`, `is_main`, `is_feeder`, `proxy_url`, `user_agent`, `device_id` |
+| `webhook_url` & `webhook_notifications` | Enables rich Discord webhook alerts for wins, snipes, and errors. | URL string, boolean toggle |
+| `bot_author_blacklist` | Skips messages authored by listed bot IDs to avoid false positives. | Array of Discord user IDs |
+| `nitro_settings` | Controls the Nitro redemption worker pool and retry policy. | `max_concurrent_snipes`, `request_timeout`, `max_retries` |
+| `giveaway_settings` | Configures reaction delays, DM messages, and keyword filters. | `min_delay_sec`, `max_delay_sec`, `dm_message`, `global_blacklist_keywords`, `server_specific_rules` |
+| `invite_sniper_settings` | Optional module that auto-joins servers that meet your criteria. | `enabled`, `min_member_count`, `max_member_count`, `server_blacklist_ids`, `max_joins_per_hour` |
 
 ### 4️⃣ **Run the Selfbot**
 Start the bot with:
 ```bash
-python main.py [-c path/to/config.json] [--token YOUR_TOKEN]
+python main.py
 ```
 or use the provided launch scripts, which automatically manage a virtual environment and install dependencies:
 
 - **Windows:** `launch.bat`
 - **Linux/macOS:** `./launch.sh`
 
-If the bot exits with `Invalid config`, ensure your JSON follows the schema in `config_loader.py`.
+If startup fails with a configuration error, double-check that your JSON matches the schema described above and that every account includes a unique token, user agent, and device ID.
 
 ## Architecture Overview
 
