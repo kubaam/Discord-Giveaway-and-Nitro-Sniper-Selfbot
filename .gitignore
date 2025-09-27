@@ -11,6 +11,7 @@ dist/
 
 # Logs
 logs.txt
+sniper.log
 
 # Virtual environments
 venv/

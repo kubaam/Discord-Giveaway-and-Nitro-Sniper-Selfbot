@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
 from typing import (
     Any,
+    Callable,
     Coroutine,
     Dict,
     List,
@@ -479,14 +480,59 @@ def redeem_nitro_coro(code: str):
 
 
 # --- Giveaway Sniping ---
-def create_smart_giveaway_entry_coro(message: discord.Message):
-    """Returns a coroutine that tries to click a button, falling back to a reaction."""
+def _encode_reaction_emoji_identifier(emoji: Any) -> Optional[str]:
+    """Converts an emoji representation into the identifier expected by the HTTP API."""
+    if emoji is None:
+        return None
+
+    if isinstance(emoji, str):
+        return discord.http._uriquote(emoji)
+
+    emoji_id = getattr(emoji, "id", None)
+    emoji_name = getattr(emoji, "name", None)
+
+    if emoji_id:
+        if not emoji_name:
+            return None
+        prefix = "a:" if getattr(emoji, "animated", False) else ""
+        return f"{prefix}{emoji_name}:{emoji_id}"
+
+    if emoji_name:
+        return discord.http._uriquote(emoji_name)
+
+    return None
+
+
+def _collect_existing_reaction_identifiers(message: discord.Message) -> List[str]:
+    """Returns encoded reaction identifiers for reactions not made by the current user."""
+    identifiers: List[str] = []
+    for reaction in getattr(message, "reactions", []):
+        if getattr(reaction, "me", False):
+            continue
+
+        count = getattr(reaction, "count", 0)
+        if count is not None and count <= 0:
+            continue
+
+        identifier = _encode_reaction_emoji_identifier(getattr(reaction, "emoji", None))
+        if identifier:
+            identifiers.append(identifier)
+
+    return identifiers
+
+
+def create_smart_giveaway_entry_coro(message: discord.Message) -> Optional[Callable[[aiohttp.ClientSession, Dict[str, str]], Coroutine[Any, Any, aiohttp.ClientResponse]]]:
+    """Returns a coroutine that tries to click a button, falling back to existing reactions."""
     first_button = next((child for comp in message.components for child in comp.children if isinstance(child, discord.Button)), None)
-    
+    available_reactions = _collect_existing_reaction_identifiers(message)
+
+    if not first_button and not available_reactions:
+        return None
+
     interaction_url = "https://discord.com/api/v10/interactions"
-    reaction_url = f"https://discord.com/api/v10/channels/{message.channel.id}/messages/{message.id}/reactions/🎉/@me"
 
     async def _coro(session: aiohttp.ClientSession, headers: Dict[str, str]) -> aiohttp.ClientResponse:
+        button_response: Optional[aiohttp.ClientResponse] = None
         if first_button:
             await logger.log(f"Attempting button click for giveaway in {message.guild.name}...", logging.DEBUG)
             payload = {
@@ -501,14 +547,35 @@ def create_smart_giveaway_entry_coro(message: discord.Message):
                 if 200 <= button_response.status < 300:
                     await logger.log(f"Button click successful in {message.guild.name}.", logging.DEBUG)
                     return button_response
-                
+
                 response_text = await button_response.text()
-                await logger.log(f"Button click in {message.guild.name} failed (Status {button_response.status}). Response: {response_text[:200]}. Falling back to reaction.", logging.WARNING)
+                await logger.log(f"Button click in {message.guild.name} failed (Status {button_response.status}). Response: {response_text[:200]}. Falling back to reactions.", logging.WARNING)
             except Exception as e:
-                await logger.log(f"Exception during button click in {message.guild.name}: {e}. Falling back to reaction.", logging.ERROR)
-        
-        await logger.log(f"Attempting reaction for giveaway in {message.guild.name}...", logging.DEBUG)
-        return await session.put(reaction_url, headers=headers, timeout=10)
+                await logger.log(f"Exception during button click in {message.guild.name}: {e}. Falling back to reactions.", logging.ERROR)
+                if not available_reactions:
+                    raise
+
+        if not available_reactions:
+            if button_response is None:
+                raise RuntimeError("Button interaction failed and no reactions available to fall back on.")
+            return button_response
+
+        await logger.log(f"Attempting existing reactions for giveaway in {message.guild.name}...", logging.DEBUG)
+
+        last_response: Optional[aiohttp.ClientResponse] = None
+        for reaction_identifier in available_reactions:
+            reaction_url = (
+                f"https://discord.com/api/v10/channels/{message.channel.id}/messages/{message.id}/reactions/{reaction_identifier}/@me"
+            )
+            response = await session.put(reaction_url, headers=headers, timeout=10)
+            if last_response is not None:
+                await last_response.read()
+            last_response = response
+
+        if last_response is None:
+            raise RuntimeError("No reactions were processed while attempting to join the giveaway.")
+        return last_response
+
     return _coro
 
 
@@ -603,6 +670,9 @@ class SniperClient(commands.Bot):
         if any(r.emoji == "🎉" for r in message.reactions if r.me): return
 
         interaction_coro = create_smart_giveaway_entry_coro(message)
+        if interaction_coro is None:
+            return
+
         await logger.log(f"Giveaway found in {message.guild.name}. Queuing smart entry.", logging.DEBUG)
 
         delay = random.uniform(settings.min_delay_sec, settings.max_delay_sec)
