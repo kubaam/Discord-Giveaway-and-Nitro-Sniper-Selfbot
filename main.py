@@ -1,33 +1,16 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""Giveaway & Nitro Sniper Self-Bot
-
-Using discord.py-self v2.0.1+. This build includes a monkey patch that safely
-ignores ``application: None`` in ``THREAD_LIST_SYNC`` events.
-"""
-
+# --- Core Libraries ---
 import os
 import sys
 import time
-import signal
-import asyncio
 import json
-import orjson
 import re
-import aiohttp
-import discord
-import base64
-import datetime
+import asyncio
 import logging
 import random
-import secrets
-import subprocess
-import aiofiles
-from discord.ext import commands
-from config_loader import Config, BASE_DIR
+import base64
+import datetime
+from collections import defaultdict, deque
 from logging.handlers import RotatingFileHandler
-import argparse
 from typing import (
     Any,
     Coroutine,
@@ -35,700 +18,710 @@ from typing import (
     List,
     Optional,
     Set,
+    Tuple,
+    Union,
 )
-import platform
-from collections import defaultdict
 
-# ----------------------------
-# Monkey-patch Message to drop None application fields
-# ----------------------------
-from discord.message import Message as _Message
+# --- Third-Party Libraries ---
+# Install required libraries:
+# pip install "discord.py-self==2.0.1" aiohttp pydantic tenacity orjson aiofiles multidict
+try:
+    import aiohttp
+    import discord
+    import orjson  # High-performance JSON library
+    import aiofiles
+    from multidict import CIMultiDictProxy
+    from discord.ext import commands
+    from pydantic import (
+        BaseModel,
+        Field,
+        ValidationError,
+        field_validator,
+    )
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception_type,
+    )
+except ImportError:
+    print("One or more required libraries are not installed.")
+    print('Please run: pip install "discord.py-self==2.0.1" aiohttp pydantic tenacity orjson aiofiles multidict')
+    sys.exit(1)
 
 
-_orig_message_init = _Message.__init__
+# ===================================================================================================
+# 1. CONFIGURATION & DATA MODELS (Pydantic)
+# ===================================================================================================
+# Defines the structure of the `config.json` file, ensuring all settings are valid at startup.
 
-
-def _patched_message_init(self, *args, **kwargs):
-    """Drop ``application: None`` keys from the raw payload to avoid errors."""
-
-    # Locate the payload dict (usually kwargs['data'] or args[2])
-    payload = None
-    if "data" in kwargs and isinstance(kwargs["data"], dict):
-        payload = kwargs["data"]
-    elif len(args) >= 3 and isinstance(args[2], dict):
-        payload = args[2]
-    # Remove application if explicitly None
-    if payload is not None and payload.get("application") is None:
-        payload.pop("application", None)
-    # Call original initializer
-    return _orig_message_init(self, *args, **kwargs)
-
-
-_Message.__init__ = _patched_message_init
-
-# ----------------------------
-# Global Constants & Paths
-# ----------------------------
-LOG_RESET_INTERVAL = 10  # seconds to reset identical-msg counters
-RATE_LIMIT_THRESHOLD = 3  # max prints per identical msg per interval
-WEBHOOK_RATE_LIMIT_INTERVAL = 1  # sec between webhook posts
-
-TRIED_CODES_PATH = os.path.join(BASE_DIR, "tried-nitro-codes.txt")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-
-# Discord API error codes for lookup
-ERROR_CODES: Dict[int, str] = {
-    10001: "Unknown Account",
-    10002: "Unknown Application",
-    10003: "Unknown Channel",
-    10004: "Unknown Guild",
-    10005: "Unknown Integration",
-    10006: "Unknown Invite",
-    10007: "Unknown Member",
-    10008: "Unknown Message",
-    10009: "Unknown Permission Overwrite",
-    10010: "Unknown Provider",
-    10011: "Unknown Role",
-    10012: "Unknown Token",
-    10013: "Unknown User",
-    10014: "Unknown Emoji",
-    10015: "Unknown Webhook",
-    10016: "Unknown Webhook Service",
-    10017: "Unknown Connection",
-    10020: "Unknown Session",
-    10021: "Unknown Asset",
-    10023: "Unknown approval form",
-    10026: "Unknown Ban",
-    10027: "Unknown SKU",
-    10028: "Unknown Store Listing",
-    10029: "Unknown Entitlement",
-    10030: "Unknown Build",
-    10031: "Unknown Lobby",
-    10032: "Unknown Branch",
-    10033: "Unknown Store Directory Layout",
-    10035: "Unknown Price Tier",
-    10036: "Unknown Redistributable",
-    10038: "Unknown Gift Code",
-    10039: "Unknown Team",
-    40001: "Unauthorized",
-    40003: "You are opening direct messages too fast",
-    50008: "Cannot send messages in a non-text channel",
-    50012: "Invalid OAuth State",
-    50013: "Missing Permissions",
-    50014: "Invalid authentication token",
-    50050: "This gift has been redeemed already.",
-    50054: "Cannot self-redeem this gift",
-    60003: "Two-factor is required for this operation",
-}
+TRIED_CODES_PATH = os.path.join(BASE_DIR, "tried-nitro-codes.json")
+LOG_PATH = os.path.join(BASE_DIR, "sniper.log")
 
 
-class RateLimitError(Exception):
-    """Raised when the API responds with HTTP 429."""
+class AccountModel(BaseModel):
+    """Configuration for a single Discord account."""
+    token: str = Field(..., description="Discord account token.")
+    is_main: bool = Field(False, description="Mark one account as main for receiving sniped gifts.")
+    is_feeder: bool = Field(False, description="Mark accounts as feeders to snipe but not redeem gifts.")
+    proxy_url: Optional[str] = Field(None, description="URL for the proxy to use with this account.")
+    user_agent: str = Field(..., description="The User-Agent string for this account's client profile.")
+    device_id: str = Field(..., description="The X-Fingerprint/Device ID for this account's profile.")
 
-    retry_after: float
 
-    def __init__(self, retry_after: float) -> None:
-        super().__init__(f"Rate limited for {retry_after}s")
-        self.retry_after = retry_after
+class NitroSettingsModel(BaseModel):
+    """Settings specific to the Nitro sniper."""
+    max_concurrent_snipes: int = Field(default=5, ge=1, description="Max parallel Nitro redemption attempts.")
+    request_timeout: float = Field(default=8.0, gt=0, description="Timeout in seconds for Nitro HTTP requests.")
+    max_retries: int = Field(default=3, ge=1, description="Max retries on transient network errors.")
 
 
-# ----------------------------
-# Rate-limited Logger
-# ----------------------------
-class AppLogger:
-    """Helper to throttle repeated log messages and avoid spam."""
+class GiveawaySettingsModel(BaseModel):
+    """Settings specific to the Giveaway sniper."""
+    min_delay_sec: float = Field(default=2.5, ge=0, description="Minimum delay before entering a giveaway.")
+    max_delay_sec: float = Field(default=7.0, ge=0, description="Maximum delay for entering a giveaway.")
+    dm_message: str = Field("", description="Message to send the host upon winning a giveaway.")
+    global_blacklist_keywords: List[str] = Field(default=[], description="Keywords that will disqualify a giveaway in any server.")
+    server_specific_rules: Dict[int, Dict[str, List[str]]] = Field(
+        default={}, description='Server ID-keyed rules, e.g., {"server_id": {"whitelist": ["nitro"], "blacklist": []}}'
+    )
 
-    def __init__(self) -> None:
-        self.counters: Dict[str, int] = defaultdict(int)
-        self.last_reset = time.monotonic()
+
+class InviteSniperSettingsModel(BaseModel):
+    """Settings for the Invite Sniper module."""
+    enabled: bool = Field(False, description="Enable/disable the invite sniper.")
+    min_member_count: int = Field(default=50, description="Minimum member count to join a server.")
+    max_member_count: int = Field(default=50000, description="Maximum member count to join a server.")
+    server_blacklist_ids: List[int] = Field(default=[], description="List of server IDs to never join.")
+    max_joins_per_hour: int = Field(5, description="Rate limit for joining new servers to avoid detection.")
+
+
+class ConfigModel(BaseModel):
+    """The root configuration model."""
+    accounts: List[AccountModel]
+    webhook_url: Optional[str] = Field(None, description="Discord webhook for notifications.")
+    webhook_notifications: bool = Field(True, description="Master switch for all webhook notifications.")
+    bot_author_blacklist: List[int] = Field(default=[], description="List of bot author IDs to ignore messages from.")
+    nitro_settings: NitroSettingsModel = Field(default_factory=NitroSettingsModel)
+    giveaway_settings: GiveawaySettingsModel = Field(default_factory=GiveawaySettingsModel)
+    invite_sniper_settings: InviteSniperSettingsModel = Field(default_factory=InviteSniperSettingsModel)
+
+    @field_validator("accounts")
+    def validate_accounts(cls, v: List[AccountModel]) -> List[AccountModel]:
+        """Validate account roles to ensure a sane configuration."""
+        if not v:
+            raise ValueError("Configuration must contain at least one account.")
+        main_accounts = sum(1 for acc in v if acc.is_main)
+        if main_accounts != 1:
+            raise ValueError('Exactly one account must be marked as "is_main: true"')
+        return v
+
+
+# ===================================================================================================
+# 2. CORE SERVICES
+# ===================================================================================================
+# Foundational classes that manage logging, notifications, API requests, and rate limits.
+
+class RateLimitedLogger:
+    """A logger that throttles repeated messages to prevent console/log spam."""
+    def __init__(self, level=logging.INFO):
+        self._logger = logging.getLogger(__name__)
+        self._logger.setLevel(level)
+
+        # File Handler
+        file_handler = RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)-5.5s] --- %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
+        self._logger.addHandler(file_handler)
+
+        # Console Handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+        self._logger.addHandler(console_handler)
+
+        self.log_counters = defaultdict(int)
+        self.last_reset_time = time.monotonic()
         self.lock = asyncio.Lock()
+        self.LOG_RESET_INTERVAL = 15  # seconds
+        self.RATE_LIMIT_THRESHOLD = 3  # max prints per interval
 
-    async def rate_limited_log(
-        self,
-        msg: str,
-        notify_everyone: bool = False,
-        save: bool = False,
-        level: int = logging.INFO,
-    ) -> None:
-        async with self.lock:
-            now = time.monotonic()
-            if now - self.last_reset > LOG_RESET_INTERVAL:
-                self.counters.clear()
-                self.last_reset = now
-            self.counters[msg] += 1
-            if self.counters[msg] <= RATE_LIMIT_THRESHOLD:
-                await self._log(msg, notify_everyone, save, level)
-
-    async def _log(self, msg: str, notify: bool, save: bool, level: int) -> None:
-        text = f"[!] {msg}"
-        if notify:
-            text = "@everyone " + text
-        if save:
-            logging.log(level, text)
-        print(text)
-
-
-app_logger = AppLogger()
-
-
-# ----------------------------
-# Webhook Notifier
-# ----------------------------
-class WebhookNotifier:
-    def __init__(self) -> None:
-        self.last_time = 0.0
-        self.lock = asyncio.Lock()
-
-    async def _send(
-        self, payload: dict, session: aiohttp.ClientSession, url: str
-    ) -> None:
-        async with self.lock:
-            now = time.monotonic()
-            diff = now - self.last_time
-            if diff < WEBHOOK_RATE_LIMIT_INTERVAL:
-                await asyncio.sleep(WEBHOOK_RATE_LIMIT_INTERVAL - diff)
-            self.last_time = time.monotonic()
-        try:
-            async with session.post(url, json=payload) as resp:
-                if resp.status not in (200, 204):
-                    txt = await resp.text()
-                    await app_logger.rate_limited_log(
-                        f"Webhook failed {resp.status}: {txt[:200]}",
-                        save=True,
-                        level=logging.ERROR,
-                    )
-        except aiohttp.ClientError as e:
-            await app_logger.rate_limited_log(
-                f"Webhook error: {e}", save=True, level=logging.ERROR
-            )
-
-    async def send(
-        self,
-        title: str,
-        description: str,
-        config: "Config",
-        session: aiohttp.ClientSession,
-        content: str = "",
-        color: int = 0xFF8C7E,
-        footer: str = "Giveaway Sniper",
-        avatar_url: str = "https://i.imgur.com/44N46up.gif",
-    ) -> None:
-        if not (config.webhook_notification and config.webhook):
+    async def log(self, msg: str, level: int = logging.INFO, *, suppress_repetition: bool = True) -> None:
+        """Logs a message, optionally suppressing it if repeated too frequently."""
+        if not suppress_repetition:
+            self._logger.log(level, msg)
             return
+
+        async with self.lock:
+            now = time.monotonic()
+            if now - self.last_reset_time > self.LOG_RESET_INTERVAL:
+                self.log_counters.clear()
+                self.last_reset_time = now
+
+            self.log_counters[msg] += 1
+            if self.log_counters[msg] <= self.RATE_LIMIT_THRESHOLD:
+                self._logger.log(level, msg)
+
+
+logger = RateLimitedLogger()
+
+
+class WebhookNotifier:
+    """Manages sending formatted notifications to a Discord webhook."""
+    def __init__(self, config: ConfigModel, session: aiohttp.ClientSession):
+        self.config = config
+        self.session = session
+        self.lock = asyncio.Lock()
+        self.last_sent_time = 0.0
+        self.WEBHOOK_INTERVAL = 1.2  # seconds between posts
+
+    async def send(self, title: str, description: str, color: int, content: str = "", footer: Optional[str] = None) -> None:
+        """Constructs and sends an embed to the configured webhook."""
+        if not (self.config.webhook_notifications and self.config.webhook_url):
+            return
+
         payload = {
             "content": content,
-            "embeds": [
-                {
-                    "title": title,
-                    "description": description,
-                    "color": color,
-                    "footer": {"text": footer},
-                }
-            ],
-            "username": "Giveaway Sniper",
-            "avatar_url": avatar_url,
+            "embeds": [{
+                "title": title,
+                "description": description,
+                "color": color,
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+            }],
+            "username": "Sniper Bot",
+            "avatar_url": "https://i.imgur.com/44N46up.gif",
         }
-        await self._send(payload, session, config.webhook)
+        if footer:
+            payload["embeds"][0]["footer"] = {"text": footer}
+
+        async with self.lock:
+            # Simple rate limiting for the webhook itself
+            now = time.monotonic()
+            if (delta := now - self.last_sent_time) < self.WEBHOOK_INTERVAL:
+                await asyncio.sleep(self.WEBHOOK_INTERVAL - delta)
+            self.last_sent_time = time.monotonic()
 
-
-webhook_notifier = WebhookNotifier()
-
-
-# ----------------------------
-# Configuration Loading (initialized in main)
-# ----------------------------
-
-config: Config
-
-# ----------------------------
-# Concurrency Control
-# ----------------------------
-nitro_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
-
-
-def update_concurrency() -> None:
-    global nitro_semaphore
-    max_snipes = int(config.nitro_settings.get("max_snipes", 5))
-    nitro_semaphore = asyncio.Semaphore(max_snipes)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Discord Giveaway & Nitro Sniper")
-    parser.add_argument(
-        "-c", "--config", default=CONFIG_PATH, help="Path to config JSON"
-    )
-    parser.add_argument("-t", "--token", help="Override token from config")
-    return parser.parse_args()
-
-
-# ----------------------------
-# Reload config on SIGHUP
-# ----------------------------
-def _reload(sig=None, frame=None):
-    global config
-    try:
-        config = Config.load(CONFIG_PATH)
-        update_concurrency()
-        update_retry_settings()
-        asyncio.create_task(
-            app_logger.rate_limited_log("Config reloaded", level=logging.INFO)
-        )
-    except Exception as e:
-        asyncio.create_task(
-            app_logger.rate_limited_log(f"Reload error: {e}", level=logging.ERROR)
-        )
-
-
-if hasattr(signal, "SIGHUP"):
-    signal.signal(signal.SIGHUP, _reload)
-
-# ----------------------------
-# HTTP Session Factory
-# ----------------------------
-http_session: Optional[aiohttp.ClientSession] = None
-
-
-async def get_session() -> aiohttp.ClientSession:
-    global http_session
-    if http_session is None or http_session.closed:
-        timeout = float(config.nitro_settings.get("request_timeout", 10))
-        http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            trust_env=True,
-            json_serialize=lambda v: orjson.dumps(v).decode(),
-        )
-    return http_session
-
-
-# ----------------------------
-# Nitro Codes Persistence
-# ----------------------------
-async def load_used_codes() -> Set[str]:
-    if not os.path.exists(TRIED_CODES_PATH):
-        return set()
-    try:
-        async with aiofiles.open(TRIED_CODES_PATH, "rb") as f:
-            data = await f.read()
-            return set(orjson.loads(data) or [])
-    except Exception as e:
-        await app_logger.rate_limited_log(f"Load codes error: {e}", level=logging.ERROR)
-        return set()
-
-
-async def save_used_codes(codes: Set[str]) -> None:
-    try:
-        async with aiofiles.open(TRIED_CODES_PATH, "wb") as f:
-            await f.write(orjson.dumps(sorted(codes), option=orjson.OPT_INDENT_2))
-    except Exception as e:
-        await app_logger.rate_limited_log(f"Save codes error: {e}", level=logging.ERROR)
-
-
-USED_CODES: Set[str] = set()
-
-
-# ----------------------------
-# Utilities
-# ----------------------------
-def clear_console() -> None:
-    cmd = "cls" if platform.system() == "Windows" else "clear"
-    try:
-        subprocess.run([cmd], check=False)
-    except FileNotFoundError:
-        pass
-
-
-async def restart_script() -> None:
-    await app_logger.rate_limited_log("Restarting...", save=True, level=logging.WARNING)
-    try:
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception as e:
-        await app_logger.rate_limited_log(
-            f"Restart failed: {e}", save=True, level=logging.CRITICAL
-        )
-        sys.exit(1)
-
-
-def task_error_handler(task: asyncio.Task) -> None:
-    try:
-        if err := task.exception():
-            asyncio.create_task(
-                app_logger.rate_limited_log(f"Task error: {err}", level=logging.ERROR)
-            )
-    except asyncio.CancelledError:
-        pass
-
-
-def create_task_safe(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
-    t = asyncio.create_task(coro)
-    t.add_done_callback(task_error_handler)
-    return t
-
-
-async def human_sleep(base: float, jitter: float = 0.2) -> None:
-    delay = random.SystemRandom().uniform(base * (1 - jitter), base * (1 + jitter))
-    await asyncio.sleep(delay)
-
-
-def random_super_properties() -> str:
-    props = {
-        "os": secrets.choice(["Windows", "Linux", "Mac OS X"]),
-        "browser": "Chrome",
-        "device": "",
-        "browser_user_agent": (
-            secrets.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
-        ),
-        "client_build_number": secrets.randbelow(10000) + 10000,
-        "release_channel": "stable",
-    }
-    raw = orjson.dumps(props)
-    return base64.b64encode(raw).decode()
-
-
-def random_headers(token: str) -> Dict[str, str]:
-    headers = {
-        "Authorization": token,
-        "User-Agent": (
-            secrets.choice(config.user_agents) if config.user_agents else "Mozilla/5.0"
-        ),
-        "X-Super-Properties": random_super_properties(),
-        "Content-Type": "application/json",
-    }
-    if config.device_ids:
-        headers["X-Fingerprint"] = secrets.choice(config.device_ids)
-    return headers
-
-
-def extract_embed_text(embed: discord.Embed) -> str:
-    d = embed.to_dict()
-    parts = [d.get("title", ""), d.get("description", "")]
-    parts += [f"{f['name']}\n{f['value']}" for f in d.get("fields", [])]
-    return "\n".join(p for p in parts if p).lower()
-
-
-def extract_first_button(message: discord.Message) -> Optional[Any]:
-    for row in getattr(message, "components", []):
-        for component in getattr(row, "children", []):
-            if getattr(component, "type", None) == discord.ComponentType.button:
-                return component
-    return None
-
-
-def contains_blacklisted(text: str, blacklist: List[str]) -> bool:
-    tl = (text or "").lower()
-    return any(term.lower() in tl for term in blacklist)
-
-
-# ----------------------------
-# Bot Setup
-# ----------------------------
-client = commands.Bot(command_prefix=";", help_command=None, self_bot=True)
-
-
-def is_blacklisted(user_id: int) -> bool:
-    return (client.user and user_id == client.user.id) or str(
-        user_id
-    ) in config.bot_blacklist
-
-
-# ----------------------------
-# Nitro Redemption with retries
-# ----------------------------
-NITRO_MAX_RETRIES = 3
-
-
-def update_retry_settings() -> None:
-    global NITRO_MAX_RETRIES
-    NITRO_MAX_RETRIES = int(config.nitro_settings.get("max_retries", 3))
-
-
-async def redeem_nitro_code(token: str, code: str) -> None:
-    url = f"https://discord.com/api/v10/entitlements/gift-codes/{code}/redeem"
-    headers = random_headers(token)
-    session = await get_session()
-
-    start = datetime.datetime.utcnow()
-    attempt = 0
-    while attempt < NITRO_MAX_RETRIES:
-        attempt += 1
-        async with nitro_semaphore:
-            async with session.post(url, headers=headers, json={}) as resp:
-                if resp.status == 429:
-                    data = await resp.json()
-                    retry_after = data.get("retry_after", 1)
-                    await human_sleep(retry_after)
-                    if attempt >= NITRO_MAX_RETRIES:
-                        raise RateLimitError(retry_after)
-                    continue
-
-                try:
-                    data = await resp.json()
-                except Exception:
-                    await app_logger.rate_limited_log(
-                        f"JSON parse error for {code}", level=logging.ERROR
-                    )
-                    status = "Parse error"
-                else:
-                    msg = data.get("message", "").lower()
-                    ec = data.get("code")
-                    if 200 <= resp.status < 300:
-                        status = "Successfully redeemed"
-                    elif ec == 10038 or "unknown gift" in msg:
-                        status = "Invalid code"
-                    elif ec == 50050 or "already redeemed" in msg:
-                        status = "Already redeemed"
-                    else:
-                        status = f"Unexpected ({ec}): {msg}"
-                break
-    elapsed = (datetime.datetime.utcnow() - start).total_seconds()
-    await nitro_info(elapsed, code, status)
-
-
-async def nitro_info(elapsed: float, code: str, status: str) -> None:
-    await app_logger.rate_limited_log(f"Nitro {status} in {elapsed:.3f}s — {code}")
-    session = await get_session()
-    await webhook_notifier.send(
-        title="🔑 Nitro Status",
-        description=f"**Time:** `{elapsed:.3f}s`\n**Code:** `{code}`\n**Status:** {status}",
-        config=config,
-        session=session,
-        content="@everyone" if "success" in status.lower() else "",
-        color=0x3498DB,
-        footer="Nitro Sniper",
-    )
-
-
-async def check_nitro_codes(message: discord.Message) -> None:
-    codes = re.findall(
-        r"(?:discord(?:\.gift|\.com/gifts|\.app\.com/gifts)/)([A-Za-z0-9]+)",
-        message.content or "",
-    )
-    new = {c for c in codes if 16 <= len(c) <= 24 and c not in USED_CODES}
-    if not new:
-        return
-    USED_CODES.update(new)
-    await save_used_codes(USED_CODES)
-    for c in new:
-        create_task_safe(redeem_nitro_code(config.token, c))
-
-
-# ----------------------------
-# Giveaway Sniping
-# ----------------------------
-async def giveaway_info(message: discord.Message, action: str) -> None:
-    guild = message.guild.name if message.guild else "DM"
-    chan = message.channel.name if message.channel else "DM"
-    host = message.author.name
-    jump = getattr(message, "jump_url", "")
-    notify = action.lower() == "won"
-
-    await app_logger.rate_limited_log(
-        f"Giveaway {action} on {guild}/{chan}", notify_everyone=notify
-    )
-
-    desc = (
-        f"**Action:** {action}\n"
-        f"**Server:** {guild}\n"
-        f"**Channel:** {chan}\n"
-        f"**Host:** {host}\n\n"
-        f"[Jump to message]({jump})"
-    )
-    session = await get_session()
-    await webhook_notifier.send(
-        title="🏆 Giveaway Win" if notify else "🎁 Giveaway Sniped",
-        description=desc,
-        config=config,
-        session=session,
-        content="@everyone" if notify else "",
-        color=0x2ECC71 if notify else 0xF1C40F,
-        footer="Giveaway Sniper",
-    )
-
-
-async def handle_giveaway_reaction(message: discord.Message) -> None:
-    if message.webhook_id or (client.user and message.author.id == client.user.id):
-        return
-    if contains_blacklisted(message.content or "", config.giveaway_blacklist):
-        return
-    if any(
-        contains_blacklisted(extract_embed_text(e), config.giveaway_blacklist)
-        for e in message.embeds
-    ):
-        return
-
-    await asyncio.sleep(random.SystemRandom().uniform(30, 60))
-    try:
-        btn = extract_first_button(message)
-        if btn:
-            await btn.click()
-            await giveaway_info(message, "Clicked")
-        else:
-            await message.add_reaction("🎉")
-            await giveaway_info(message, "Reacted")
-    except discord.HTTPException as e:
-        if e.code not in (50013, 10008):
-            await app_logger.rate_limited_log(
-                f"Giveaway HTTP error: {e}", level=logging.ERROR
-            )
-    except Exception as e:
-        await app_logger.rate_limited_log(f"Giveaway error: {e}", level=logging.ERROR)
-
-
-async def check_giveaway_message(message: discord.Message) -> None:
-    keywords = [
-        "giveaway",
-        "**giveaway**",
-        "ends at",
-        "ends:",
-        "hosted by",
-        ":gift:",
-        ":tada:",
-        "🎉",
-        "winners:",
-        "entries:",
-    ]
-    content = (message.content or "").lower()
-    embeds = [extract_embed_text(e) for e in message.embeds]
-    if any(k in content for k in keywords) or any(
-        k in em for em in embeds for k in keywords
-    ):
-        create_task_safe(handle_giveaway_reaction(message))
-
-
-async def detect_giveaway_win(message: discord.Message) -> None:
-    if not (client.user and message.guild and message.author):
-        return
-    win_keywords = ["won", "winner", "congratulations", "victory", "congrats"]
-    # message.content may be None for certain system messages
-    content = (message.content or "").lower()
-    mentioned = (
-        any(m.id == client.user.id for m in message.mentions)
-        or f"<@{client.user.id}>" in content
-        or f"<@!{client.user.id}>" in content
-    )
-    if mentioned and any(k in content for k in win_keywords):
-        await giveaway_info(message, "Won")
-
-        host_user = None
-        for embed in message.embeds:
-            for field in getattr(embed, "fields", []):
-                if "host" in field.name.lower():
-                    m = re.search(r"<@!?(\d+)>", field.value)
-                    if m:
-                        uid = int(m.group(1))
-                        host_user = message.guild.get_member(
-                            uid
-                        ) or await client.fetch_user(uid)
-                    break
-            if host_user:
-                break
-
-        if host_user and not host_user.bot and config.dm_message:
             try:
-                await host_user.send(config.dm_message)
-                await app_logger.rate_limited_log(f"DM sent to host {host_user}")
+                async with self.session.post(str(self.config.webhook_url), json=payload) as resp:
+                    if resp.status not in (200, 204):
+                        txt = await resp.text()
+                        await logger.log(
+                            f"Webhook send failed with status {resp.status}: {txt[:200]}",
+                            logging.ERROR,
+                        )
+            except aiohttp.ClientError as e:
+                await logger.log(f"Webhook client error: {e}", logging.ERROR)
+
+
+class ClientProfileManager:
+    """Generates and manages consistent client profiles for stealth."""
+    def __init__(self, account: AccountModel):
+        self.account = account
+        self.super_properties = self._generate_super_properties()
+
+    def _generate_super_properties(self) -> str:
+        """Generates a consistent X-Super-Properties header."""
+        # This should be derived from a realistic client build
+        properties = {
+            "os": "Windows", "browser": "Chrome", "device": "", "system_locale": "en-US",
+            "browser_user_agent": self.account.user_agent,
+            "browser_version": "117.0.0.0",  # Example, should be consistent with UA
+            "os_version": "10", "referrer": "", "referring_domain": "", "referrer_current": "",
+            "referring_domain_current": "", "release_channel": "stable",
+            "client_build_number": 202930,  # Example, find a recent one
+            "client_event_source": None,
+        }
+        encoded = orjson.dumps(properties)
+        return base64.b64encode(encoded).decode("utf-8")
+
+    def get_headers(self) -> Dict[str, str]:
+        """Returns a complete, consistent set of headers for an API request."""
+        return {
+            "Authorization": self.account.token, "Accept": "*/*", "Accept-Language": "en-US",
+            "Connection": "keep-alive", "Content-Type": "application/json",
+            "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-origin",
+            "User-Agent": self.account.user_agent, "X-Super-Properties": self.super_properties,
+            "X-Fingerprint": self.account.device_id, "X-Discord-Locale": "en-US",
+        }
+
+
+class RateLimitGovernor:
+    """Proactively manages rate limits for all API endpoints."""
+    def __init__(self):
+        self.buckets: Dict[str, Tuple[asyncio.Lock, float, int]] = {}
+        self.global_lock = asyncio.Lock()
+        self.global_reset = 0.0
+        self.lock = asyncio.Lock()
+
+    async def wait_for_bucket(self, bucket_id: str) -> None:
+        """Pauses execution if the specified rate limit bucket is exhausted."""
+        async with self.global_lock:
+            now = time.monotonic()
+            if self.global_reset > now:
+                await asyncio.sleep(self.global_reset - now)
+
+        async with self.lock:
+            if bucket_id not in self.buckets:
+                self.buckets[bucket_id] = (asyncio.Lock(), 0.0, 1)
+            bucket_lock, reset_at, remaining = self.buckets[bucket_id]
+
+        async with bucket_lock:
+            now = time.monotonic()
+            if remaining < 1 and reset_at > now:
+                await logger.log(
+                    f"Rate limit on bucket {bucket_id} hit. Sleeping for {reset_at - now:.2f}s", logging.WARNING,
+                )
+                await asyncio.sleep(reset_at - now)
+
+    async def update_bucket(self, bucket_id: Optional[str], headers: CIMultiDictProxy) -> None:
+        """Updates a bucket's state from API response headers."""
+        if not bucket_id:
+            return
+
+        if headers.get("X-RateLimit-Global"):
+            retry_after = float(headers.get("Retry-After", 1.0))
+            async with self.global_lock:
+                self.global_reset = time.monotonic() + retry_after
+            return
+
+        try:
+            remaining = int(headers.get("X-RateLimit-Remaining", 1))
+            reset_after = float(headers.get("X-RateLimit-Reset-After", 0))
+        except (ValueError, TypeError):
+            return
+
+        async with self.lock:
+            if bucket_id not in self.buckets:
+                self.buckets[bucket_id] = (asyncio.Lock(), 0.0, 1)
+
+            bucket_lock, _, _ = self.buckets[bucket_id]
+            self.buckets[bucket_id] = (bucket_lock, time.monotonic() + reset_after, remaining)
+
+
+# ===================================================================================================
+# 3. API WORKER & QUEUE
+# ===================================================================================================
+
+class APIJob:
+    """Represents a job to be executed by an APIConsumer."""
+    def __init__(self, priority: int, coro: Coroutine, account_token: str, metadata: Dict[str, Any]):
+        self.priority = priority
+        self.coro = coro
+        self.account_token = account_token
+        self.metadata = metadata
+
+    def __lt__(self, other):
+        return self.priority < other.priority
+
+
+class APIConsumer:
+    """A worker that pulls jobs from the queue and executes them safely."""
+    def __init__(
+        self, queue: asyncio.PriorityQueue, governor: RateLimitGovernor,
+        profile_managers: Dict[str, ClientProfileManager], session: aiohttp.ClientSession,
+        webhook: WebhookNotifier, config: ConfigModel
+    ):
+        self.queue = queue
+        self.governor = governor
+        self.profile_managers = profile_managers
+        self.session = session
+        self.webhook = webhook
+        self.config = config
+        self.running = True
+
+    async def run(self):
+        """The main loop for the consumer worker."""
+        await logger.log(f"API Consumer worker {id(self)} started.")
+        while self.running:
+            try:
+                job: APIJob = await self.queue.get()
+                await self.process_job(job)
+                self.queue.task_done()
+            except asyncio.CancelledError:
+                self.running = False
+                break
             except Exception as e:
-                await app_logger.rate_limited_log(
-                    f"DM host failed: {e}", level=logging.ERROR
+                await logger.log(
+                    f"Critical error in consumer worker: {e}", logging.CRITICAL, suppress_repetition=False
                 )
 
+    async def process_job(self, job: APIJob):
+        """Handles a single job, including rate limiting and error handling."""
+        endpoint = job.metadata.get("endpoint")
+        if not endpoint:
+            await logger.log(f"Job has no endpoint metadata: {job.metadata}", logging.ERROR)
+            return
 
-# ----------------------------
-# Bot Event Handlers
-# ----------------------------
-@client.event
-async def on_ready() -> None:
-    global USED_CODES
-    session = await get_session()
-    USED_CODES = await load_used_codes()
-    await app_logger.rate_limited_log(
-        f"Ready as {client.user} in {len(client.guilds)} guilds", level=logging.INFO
-    )
-    await webhook_notifier.send(
-        title="✅ Bot Connected",
-        description=f"**User:** `{client.user}`\n**ID:** `{client.user.id}`",
-        config=config,
-        session=session,
-        color=0x2ECC71,
-        footer=f"discord.py-self {discord.__version__}",
-    )
+        profile = self.profile_managers.get(job.account_token)
+        if not profile:
+            await logger.log(
+                f"No client profile found for token ending in ...{job.account_token[-4:]}", logging.ERROR,
+            )
+            return
+
+        await self.governor.wait_for_bucket(endpoint)
+
+        try:
+            response = await job.coro(self.session, profile.get_headers())
+            bucket_id = response.headers.get("X-RateLimit-Bucket")
+            await self.governor.update_bucket(bucket_id, response.headers)
+            await self.handle_response(response, job.metadata)
+        except aiohttp.ClientError as e:
+            await logger.log(f"HTTP Client Error for {endpoint}: {e}", logging.ERROR)
+        except asyncio.TimeoutError:
+            await logger.log(f"Request timeout for {endpoint}", logging.ERROR)
+        except Exception as e:
+            await logger.log(
+                f"Unexpected error processing job for {endpoint}: {e}", logging.ERROR, suppress_repetition=False
+            )
+
+    async def handle_response(self, response: aiohttp.ClientResponse, metadata: Dict[str, Any]):
+        """Processes the API response based on the job's metadata."""
+        job_type = metadata.get("type")
+        if job_type == "nitro_redeem":
+            await self.handle_nitro_response(response, metadata)
+        elif job_type == "giveaway_interact":
+            await self.handle_giveaway_response(response, metadata)
+        elif job_type == "invite_join":
+            await self.handle_invite_response(response, metadata)
+
+    async def handle_nitro_response(self, response: aiohttp.ClientResponse, metadata: Dict[str, Any]):
+        """Specific logic for handling Nitro redemption responses."""
+        code, start_time = metadata["code"], metadata["start_time"]
+        elapsed = time.monotonic() - start_time
+        status, color = "Failed", 0xE74C3C  # Red
+
+        if 200 <= response.status < 300:
+            status, color = "Successfully redeemed!", 0x2ECC71  # Green
+            await logger.log(f"SUCCESSFULLY REDEEMED NITRO: {code} in {elapsed:.3f}s", logging.INFO, suppress_repetition=False)
+        else:
+            try:
+                data = await response.json(loads=orjson.loads)
+                message = data.get("message", "No message.")
+                if "unknown gift code" in message.lower(): status = "Invalid Code"
+                elif "already been redeemed" in message.lower(): status = "Already Redeemed"
+                else: status = f"Failed ({response.status}): {message}"
+                await logger.log(f"Nitro snipe for {code} failed: {status}", logging.INFO)
+            except Exception:
+                status = f"Failed with status {response.status} (non-JSON response)"
+                await logger.log(f"Nitro snipe for {code} failed: {status}", logging.WARN)
+
+        await self.webhook.send(
+            title="🔑 Nitro Snipe Result",
+            description=f"**Code:** `{code}`\n**Status:** {status}\n**Latency:** `{elapsed:.3f}s`",
+            color=color, content="@everyone" if "success" in status.lower() else "",
+            footer=f"Account: ...{metadata['token_suffix']}",
+        )
+
+    async def handle_giveaway_response(self, response: aiohttp.ClientResponse, metadata: Dict[str, Any]):
+        """Specific logic for handling giveaway interaction responses."""
+        guild_name = metadata.get("guild_name", "Unknown Server")
+        channel_name = metadata.get("channel_name", "Unknown Channel")
+
+        if 200 <= response.status < 300:
+            await logger.log(f"Successfully entered giveaway in {guild_name}/#{channel_name}", logging.INFO)
+            await self.webhook.send(
+                title="🎁 Giveaway Entered",
+                description=f"**Server:** `{guild_name}`\n**Channel:** `#{channel_name}`\n**Jump URL:** [Click Here]({metadata['jump_url']})",
+                color=0x3498DB, footer=f"Account: ...{metadata['token_suffix']}",
+            )
+        else:
+            await logger.log(f"Failed to enter giveaway in {guild_name}/#{channel_name}. Status: {response.status}", logging.WARN)
+
+    async def handle_invite_response(self, response: aiohttp.ClientResponse, metadata: Dict[str, Any]):
+        """Specific logic for handling server join responses."""
+        invite_code = metadata['invite_code']
+        if 200 <= response.status < 300:
+            await logger.log(f"Successfully joined server with invite: {invite_code}", logging.INFO)
+        else:
+            await logger.log(f"Failed to join server with invite {invite_code}. Status: {response.status}", logging.WARN)
 
 
-@client.event
-async def on_message(message: discord.Message) -> None:
-    if message.author == client.user or is_blacklisted(message.author.id):
-        return
-    create_task_safe(check_nitro_codes(message))
-    if message.author.bot:
-        create_task_safe(check_giveaway_message(message))
-        create_task_safe(detect_giveaway_win(message))
-    await client.process_commands(message)
+# ===================================================================================================
+# 4. FEATURE IMPLEMENTATIONS
+# ===================================================================================================
 
+# --- Nitro Sniping ---
+USED_NITRO_CODES: Set[str] = set()
+NITRO_REGEX = re.compile(r"(?:discord\.gift/|discord\.com/gifts/|discordapp\.com/gifts/)([a-zA-Z0-9]{16,24})")
 
-@client.event
-async def on_disconnect() -> None:
-    if http_session and not http_session.closed:
-        await http_session.close()
-    await app_logger.rate_limited_log("HTTP session closed", level=logging.INFO)
-
-
-# ----------------------------
-# Logging Configuration
-# ----------------------------
-formatter = logging.Formatter(
-    "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-)
-file_handler = RotatingFileHandler(
-    os.path.join(BASE_DIR, "logs.txt"),
-    maxBytes=5 * 1024 * 1024,
-    backupCount=5,
-    encoding="utf-8",
-)
-file_handler.setFormatter(formatter)
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(formatter)
-
-logging.basicConfig(
-    level=logging.INFO, handlers=[file_handler, console_handler], encoding="utf-8"
-)
-
-
-# ----------------------------
-# Main Entry Point
-# ----------------------------
-def main() -> None:
-    args = parse_args()
-    global CONFIG_PATH, config
-    CONFIG_PATH = args.config
-    config = Config.load(CONFIG_PATH)
-    if args.token:
-        config.token = args.token
-    else:
-        config.token = os.getenv("DISCORD_TOKEN", config.token)
-    update_concurrency()
-    update_retry_settings()
-    if platform.system() == "Windows":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+async def load_used_codes() -> Set[str]:
+    """Loads previously tried Nitro codes from a file."""
+    if not os.path.exists(TRIED_CODES_PATH): return set()
     try:
-        client.run(config.token, reconnect=True)
-    except discord.LoginFailure:
-        asyncio.run(
-            app_logger.rate_limited_log(
-                "Invalid token", save=True, level=logging.CRITICAL
-            )
-        )
-        sys.exit(1)
+        async with aiofiles.open(TRIED_CODES_PATH, "rb") as f:
+            content = await f.read()
+            return set(orjson.loads(content))
     except Exception as e:
-        asyncio.run(
-            app_logger.rate_limited_log(
-                f"Fatal: {e}", save=True, level=logging.CRITICAL
-            )
+        await logger.log(f"Failed to load used codes: {e}", logging.ERROR)
+        return set()
+
+async def save_used_codes():
+    """Saves the set of used Nitro codes to a file."""
+    try:
+        async with aiofiles.open(TRIED_CODES_PATH, "wb") as f:
+            await f.write(orjson.dumps(list(USED_NITRO_CODES)))
+    except Exception as e:
+        await logger.log(f"Failed to save used codes: {e}", logging.ERROR)
+
+def redeem_nitro_coro(code: str):
+    """Returns a coroutine that attempts to redeem a Nitro code."""
+    url = f"https://discord.com/api/v10/entitlements/gift-codes/{code}/redeem"
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
+    )
+    async def _coro(session: aiohttp.ClientSession, headers: Dict[str, str]) -> aiohttp.ClientResponse:
+        return await session.post(url, headers=headers, json={}, timeout=8)
+    return _coro
+
+
+# --- Giveaway Sniping ---
+def create_smart_giveaway_entry_coro(message: discord.Message):
+    """Returns a coroutine that tries to click a button, falling back to a reaction."""
+    first_button = next((child for comp in message.components for child in comp.children if isinstance(child, discord.Button)), None)
+    
+    interaction_url = "https://discord.com/api/v10/interactions"
+    reaction_url = f"https://discord.com/api/v10/channels/{message.channel.id}/messages/{message.id}/reactions/🎉/@me"
+
+    async def _coro(session: aiohttp.ClientSession, headers: Dict[str, str]) -> aiohttp.ClientResponse:
+        if first_button:
+            await logger.log(f"Attempting button click for giveaway in {message.guild.name}...", logging.DEBUG)
+            payload = {
+                "type": 3, "nonce": str(random.randint(10**18, 10**19 - 1)),
+                "guild_id": message.guild.id, "channel_id": message.channel.id,
+                "message_flags": 0, "message_id": message.id,
+                "application_id": str(message.author.id), "session_id": "0",
+                "data": {"component_type": first_button.type.value, "custom_id": first_button.custom_id},
+            }
+            try:
+                button_response = await session.post(interaction_url, headers=headers, json=payload, timeout=10)
+                if 200 <= button_response.status < 300:
+                    await logger.log(f"Button click successful in {message.guild.name}.", logging.DEBUG)
+                    return button_response
+                
+                response_text = await button_response.text()
+                await logger.log(f"Button click in {message.guild.name} failed (Status {button_response.status}). Response: {response_text[:200]}. Falling back to reaction.", logging.WARNING)
+            except Exception as e:
+                await logger.log(f"Exception during button click in {message.guild.name}: {e}. Falling back to reaction.", logging.ERROR)
+        
+        await logger.log(f"Attempting reaction for giveaway in {message.guild.name}...", logging.DEBUG)
+        return await session.put(reaction_url, headers=headers, timeout=10)
+    return _coro
+
+
+# --- Invite Sniping ---
+INVITE_REGEX = re.compile(r"(?:discord\.gg/|discord\.com/invite/)([a-zA-Z0-9]+)")
+JOINED_SERVERS_HISTORY = deque(maxlen=50) # Track recent joins for rate limiting
+
+def join_server_coro(invite_code: str):
+    """Returns a coroutine for joining a server via an invite code."""
+    url = f"https://discord.com/api/v10/invites/{invite_code}"
+    async def _coro(session: aiohttp.ClientSession, headers: Dict[str, str]) -> aiohttp.ClientResponse:
+        return await session.post(url, headers=headers, json={}, timeout=15)
+    return _coro
+
+
+# ===================================================================================================
+# 5. DISCORD BOT EVENT HANDLERS (Producers)
+# ===================================================================================================
+
+class SniperClient(commands.Bot):
+    """Custom client class to hold shared resources."""
+    def __init__(self, account_config: AccountModel, shared_config: ConfigModel, api_queue: asyncio.PriorityQueue, webhook: WebhookNotifier, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.account_config = account_config
+        self.shared_config = shared_config
+        self.api_queue = api_queue
+        self.webhook = webhook
+        self.main_account_token = next(acc.token for acc in shared_config.accounts if acc.is_main)
+
+        self.add_listener(self.on_ready_sniper, "on_ready")
+        self.add_listener(self.on_message_sniper, "on_message")
+
+    async def on_ready_sniper(self):
+        """Called when this specific client is connected and ready."""
+        role = 'Main' if self.account_config.is_main else 'Feeder'
+        await logger.log(f"Client ready: {self.user} ({self.user.id}) in {len(self.guilds)} guilds. Role: {role}")
+        await self.webhook.send(
+            title="✅ Client Connected",
+            description=f"**User:** `{self.user}`\n**ID:** `{self.user.id}`\n**Role:** {role}",
+            color=0x2ECC71,
         )
-        asyncio.run(restart_script())
+
+    async def on_message_sniper(self, message: discord.Message):
+        """Processes every message seen by this client."""
+        if not message.guild or not message.author or message.author == self.user: return
+        if message.author.id in self.shared_config.bot_author_blacklist: return
+
+        await self.check_for_nitro(message)
+        if message.author.bot:
+            await self.check_for_giveaway(message)
+            await self.check_for_invite(message)
+            await self.check_for_win(message)
+
+    async def check_for_nitro(self, message: discord.Message):
+        """Finds Nitro codes and queues redemption jobs."""
+        codes = NITRO_REGEX.findall(message.content)
+        if not codes: return
+
+        redeem_token = self.main_account_token if self.account_config.is_feeder else self.account_config.token
+        for code in codes:
+            if code not in USED_NITRO_CODES:
+                USED_NITRO_CODES.add(code)
+                asyncio.create_task(save_used_codes())
+                await logger.log(f"Nitro code found: {code}. Queuing redemption.", logging.INFO)
+                
+                job = APIJob(
+                    priority=1, coro=redeem_nitro_coro(code), account_token=redeem_token,
+                    metadata={
+                        "type": "nitro_redeem", "endpoint": f"/entitlements/gift-codes/{code}/redeem",
+                        "code": code, "start_time": time.monotonic(), "token_suffix": redeem_token[-4:],
+                    },
+                )
+                await self.api_queue.put(job)
+
+    async def check_for_giveaway(self, message: discord.Message):
+        """Identifies potential giveaways and queues a smart interaction job."""
+        settings = self.shared_config.giveaway_settings
+        embed_text = "".join(orjson.dumps(e.to_dict()).decode('utf-8', 'ignore').lower() for e in message.embeds)
+        full_text = message.content.lower() + embed_text
+
+        # Filtering Logic
+        if any(keyword.lower() in full_text for keyword in settings.global_blacklist_keywords): return
+
+        server_rules = settings.server_specific_rules.get(message.guild.id)
+        if server_rules:
+            if any(k.lower() in full_text for k in server_rules.get("blacklist", [])): return
+            if "whitelist" in server_rules and not any(k.lower() in full_text for k in server_rules["whitelist"]): return
+        elif not any(kw in full_text for kw in ["giveaway", "win", "prize", "hosted by", "ends in", "🎉"]):
+            return
+
+        # Prevent re-entering reaction giveaways
+        if any(r.emoji == "🎉" for r in message.reactions if r.me): return
+
+        interaction_coro = create_smart_giveaway_entry_coro(message)
+        await logger.log(f"Giveaway found in {message.guild.name}. Queuing smart entry.", logging.DEBUG)
+
+        delay = random.uniform(settings.min_delay_sec, settings.max_delay_sec)
+        await asyncio.sleep(delay)
+
+        job = APIJob(
+            priority=5, coro=interaction_coro, account_token=self.account_config.token,
+            metadata={
+                "type": "giveaway_interact", "endpoint": "/interactions",
+                "guild_name": message.guild.name, "channel_name": message.channel.name,
+                "jump_url": message.jump_url, "token_suffix": self.account_config.token[-4:],
+            },
+        )
+        await self.api_queue.put(job)
+
+    async def check_for_win(self, message: discord.Message):
+        """Detects if the user has won a giveaway."""
+        if not self.user: return
+        content = message.content.lower()
+        mentioned = self.user.mention in content or f"<@!{self.user.id}>" in content
+
+        if mentioned and any(kw in content for kw in ["congratulations", "won", "winner"]):
+            await logger.log(f"Giveaway WIN detected in {message.guild.name}!", logging.INFO, suppress_repetition=False)
+            await self.webhook.send(
+                title="🏆 GIVEAWAY WON!",
+                description=f"**Server:** `{message.guild.name}`\n**Channel:** `#{message.channel.name}`\n**Message:**\n>>> {message.content}\n\n[Jump to Win Message]({message.jump_url})",
+                color=0x2ECC71, content=f"@everyone {self.user.mention}", footer=f"Account: {self.user.name}"
+            )
+
+    async def check_for_invite(self, message: discord.Message):
+        """Finds server invites and queues join jobs if they meet criteria."""
+        settings = self.shared_config.invite_sniper_settings
+        if not settings.enabled: return
+
+        now = time.monotonic()
+        # Filter out joins that are too recent
+        valid_history = [t for t in JOINED_SERVERS_HISTORY if now - 3600 < t]
+        JOINED_SERVERS_HISTORY.clear()
+        JOINED_SERVERS_HISTORY.extend(valid_history)
+        if len(JOINED_SERVERS_HISTORY) >= settings.max_joins_per_hour: return
+
+        for code in INVITE_REGEX.findall(message.content):
+            job = APIJob(
+                priority=10, coro=join_server_coro(code), account_token=self.account_config.token,
+                metadata={
+                    "type": "invite_join", "endpoint": f"/invites/{code}",
+                    "invite_code": code, "token_suffix": self.account_config.token[-4:]
+                }
+            )
+            await self.api_queue.put(job)
+            JOINED_SERVERS_HISTORY.append(time.monotonic())
+            await logger.log(f"Invite found: {code}. Queuing join job.", logging.DEBUG)
+
+
+# ===================================================================================================
+# 6. MAIN EXECUTION
+# ===================================================================================================
+
+async def main():
+    """The main entry point for the application."""
+    try:
+        with open(CONFIG_PATH, "rb") as f:
+            config_data = json.load(f)
+            if 'giveaway_settings' in config_data and 'server_specific_rules' in config_data['giveaway_settings']:
+                config_data['giveaway_settings']['server_specific_rules'] = {
+                    int(k): v for k, v in config_data['giveaway_settings']['server_specific_rules'].items()
+                }
+            config = ConfigModel.model_validate(config_data)
+    except (ValidationError, FileNotFoundError, json.JSONDecodeError) as e:
+        await logger.log(f"Configuration error: {e}", logging.CRITICAL, suppress_repetition=False)
+        sys.exit(1)
+
+    # Initialize Shared Services
+    api_queue = asyncio.PriorityQueue()
+    governor = RateLimitGovernor()
+    global_session = aiohttp.ClientSession(json_serialize=json.dumps) # Use standard json for aiohttp stability
+    webhook = WebhookNotifier(config, global_session)
+    
+    global USED_NITRO_CODES
+    USED_NITRO_CODES = await load_used_codes()
+    await logger.log(f"Loaded {len(USED_NITRO_CODES)} used Nitro codes from file.", logging.INFO)
+
+    profile_managers = {acc.token: ClientProfileManager(acc) for acc in config.accounts}
+
+    # Start API Consumers
+    consumer_tasks = [
+        asyncio.create_task(
+            APIConsumer(api_queue, governor, profile_managers, global_session, webhook, config).run()
+        ) for _ in range(5) # Start 5 consumer workers for concurrency
+    ]
+
+    # Start Discord Clients
+    client_tasks = []
+    for account in config.accounts:
+        client = SniperClient(
+            account_config=account, shared_config=config, api_queue=api_queue, webhook=webhook,
+            command_prefix="!sniper-impossible-prefix!", self_bot=True, proxy=account.proxy_url
+        )
+        client_tasks.append(client.start(account.token))
+
+    await logger.log(f"Starting {len(config.accounts)} clients and {len(consumer_tasks)} workers.", logging.INFO, suppress_repetition=False)
+    try:
+        await asyncio.gather(*client_tasks, *consumer_tasks)
+    except discord.LoginFailure as e:
+        await logger.log(f"Login failed for one or more accounts: {e}", logging.CRITICAL, suppress_repetition=False)
+    finally:
+        await global_session.close()
+        for task in consumer_tasks: task.cancel()
+        await logger.log("Shutting down.", logging.INFO)
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
+        asyncio.run(main())
+    except KeyboardInterrupt:
         pass
-    main()
+    except Exception as e:
+        # Top-level exception handler for unexpected crashes
+        asyncio.run(logger.log(f"FATAL UNHANDLED EXCEPTION: {e}", logging.CRITICAL, suppress_repetition=False))
